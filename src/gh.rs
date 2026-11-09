@@ -84,6 +84,9 @@ pub struct Item {
     /// Set once an item has left the open list: `MERGED`, `CLOSED`, or `UNLISTED`.
     pub gone: Option<String>,
     pub labels: Vec<Label>,
+    /// PR head and base branch names; empty for issues.
+    pub head: String,
+    pub base: String,
 }
 
 #[derive(Debug, Default)]
@@ -213,7 +216,7 @@ query($q:String!,$after:String){
     nodes{
       __typename
       ... on PullRequest{
-        id number title url updatedAt isDraft reviewDecision
+        id number title url updatedAt isDraft reviewDecision headRefName baseRefName
         labels(first:8){nodes{name color}}
         author{login} repository{name nameWithOwner}
         commits(last:1){nodes{commit{statusCheckRollup{state}}}}
@@ -269,6 +272,8 @@ struct Node {
     repository: Repo,
     commits: Option<Value>,
     labels: Option<Value>,
+    head_ref_name: Option<String>,
+    base_ref_name: Option<String>,
 }
 #[derive(Deserialize)]
 struct Login {
@@ -313,6 +318,8 @@ impl Node {
             ci,
             gone: None,
             labels,
+            head: self.head_ref_name.unwrap_or_default(),
+            base: self.base_ref_name.unwrap_or_default(),
         }
     }
 }

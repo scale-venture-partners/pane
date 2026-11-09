@@ -13,4 +13,5 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Label chips in GitHub colors on rows and in details; text filter matches labels.
 - Redesigned PR details: badge row, branch chips, size and check progress bars, Markdown rendering, and a diff view with file summary, line numbers, tinted rows and `]`/`[` file jumping.
 - `--demo` mode with fictional data, and README screenshots generated from it.
+- Claude action: press `C` on a PR to run `claude -p` in the background in the local clone, in an isolated worktree, with an editable default prompt, a run list, and logs.
 - Configurable orgs, repos, refresh interval and merge method.

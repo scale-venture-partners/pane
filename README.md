@@ -67,6 +67,8 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | `]` `[` | next / previous file in the diff |
 | `a` `M` `x` `D` | approve, merge, close, toggle draft (each confirms) |
 | `c` | comment |
+| `C` | run Claude on the PR (edit the prompt, Enter to run) |
+| `t` | list Claude runs |
 | `q` | quit |
 
 ## Configuration
@@ -79,12 +81,28 @@ Optional file at `~/.config/pane/config.toml` (or `$XDG_CONFIG_HOME/pane/config.
 | `merge_method` | `"squash"` | `squash`, `merge` or `rebase` |
 | `orgs` | `[]` | show every open item in these orgs |
 | `repos` | `[]` | extra `owner/name` repos to show |
+| `claude_prompt` | `"Rebase this PR on its base branch and fix any failing checks."` | default prompt for the Claude action |
+| `claude_args` | `[]` | extra arguments for `claude`, e.g. `["--permission-mode", "acceptEdits"]` |
+| `claude_worktree` | `true` | run Claude in its own git worktree |
+| `repo_roots` | `~/code`, `~/src`, `~/dev`, `~/projects`, `~/GitHub`, `~/Documents/GitHub` | where to look for local clones |
 
 When both `orgs` and `repos` are empty, pane shows items that involve you.
 
 `pane --demo` runs the UI on fictional data, with no network. `scripts/screenshots.sh` regenerates the screenshots above from it.
 
 `pane --check` prints the URL of every item pane would show, then exits. Handy for verifying a config.
+
+## Running Claude on a PR
+
+Press `C` on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background; the PR row shows a spinner and the header counts running jobs. `t` lists runs with their log paths, and a status message appears when one finishes.
+
+- **Your Claude setup:** the job inherits your environment and runs `claude` exactly as you would, so your global settings, credentials, hooks and permission rules apply. Anything `claude -p` can't do under those rules (for example run `git push`) fails the same way it would for you; allow it in your Claude settings or pass flags with `claude_args`.
+- **Where it runs:** in your local clone of the repo, found by matching `origin` against the PR's repository under `repo_roots`.
+- **Isolation:** by default each job gets its own git worktree (`.claude/worktrees/`, added to the repo's local `.git/info/exclude`), so your working copy is untouched. When the job ends, the worktree is deleted if it has no uncommitted changes and everything is pushed; otherwise it is kept and its path is reported. Set `claude_worktree = false` to run in the checkout itself.
+- **Context:** the prompt is prefixed with the PR number, title, URL, and head and base branches.
+- **Logs:** `~/.local/state/pane/claude/` (or `$XDG_STATE_HOME/pane/claude/`), one file per run with the full prompt and output.
+
+Jobs keep running if you quit pane.
 
 ## Rate limits
 

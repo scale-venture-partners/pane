@@ -53,6 +53,20 @@ fn item(kind: Kind, s: Spec) -> Item {
         ci: s.ci,
         gone: None,
         labels: s.labels,
+        head: if kind == Kind::Pr {
+            format!(
+                "{}/change-{}",
+                s.author.split('-').next().unwrap_or("dev"),
+                s.number
+            )
+        } else {
+            String::new()
+        },
+        base: if kind == Kind::Pr {
+            "main".into()
+        } else {
+            String::new()
+        },
     }
 }
 

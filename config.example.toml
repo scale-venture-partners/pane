@@ -13,3 +13,15 @@ orgs = ["my-org"]
 repos = ["octocat/hello-world"]
 
 # With both lists empty, pane shows items that involve you.
+
+# The Claude action (press C on a PR). The prompt can be edited before each run.
+claude_prompt = "Rebase this PR on its base branch and fix any failing checks."
+
+# Extra arguments passed to `claude`.
+# claude_args = ["--permission-mode", "acceptEdits"]
+
+# Run each job in its own git worktree so your checkout is untouched.
+claude_worktree = true
+
+# Directories searched for local clones of the repos you act on.
+repo_roots = ["~/code", "~/src"]

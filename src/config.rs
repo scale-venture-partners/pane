@@ -12,6 +12,14 @@ pub struct Config {
     /// Individual `owner/name` repos shown in addition to `orgs`.
     /// With both lists empty, pane shows everything that involves you.
     pub repos: Vec<String>,
+    /// Prompt sent to `claude -p` by the Claude action; editable before it runs.
+    pub claude_prompt: String,
+    /// Extra arguments for `claude`, e.g. `["--permission-mode", "acceptEdits"]`.
+    pub claude_args: Vec<String>,
+    /// Run Claude in its own git worktree so your checkout is left alone.
+    pub claude_worktree: bool,
+    /// Directories searched for local checkouts of the repos you act on.
+    pub repo_roots: Vec<String>,
 }
 
 impl Default for Config {
@@ -21,6 +29,20 @@ impl Default for Config {
             merge_method: "squash".into(),
             orgs: vec![],
             repos: vec![],
+            claude_prompt: "Rebase this PR on its base branch and fix any failing checks.".into(),
+            claude_args: vec![],
+            claude_worktree: true,
+            repo_roots: [
+                "~/code",
+                "~/src",
+                "~/dev",
+                "~/projects",
+                "~/GitHub",
+                "~/Documents/GitHub",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -51,6 +73,9 @@ impl Config {
         }
         if !["squash", "merge", "rebase"].contains(&self.merge_method.as_str()) {
             bail!("merge_method must be squash, merge or rebase");
+        }
+        if self.claude_prompt.trim().is_empty() {
+            bail!("claude_prompt must not be empty");
         }
         if let Some(bad) = self.repos.iter().find(|r| !r.contains('/')) {
             bail!("repos entries must be owner/name, got {bad:?}");
@@ -87,6 +112,24 @@ mod tests {
         let c: Config = toml::from_str("refresh_secs = 30").unwrap();
         assert_eq!(c.refresh_secs, 30);
         assert_eq!(c.merge_method, "squash");
+    }
+
+    #[test]
+    fn claude_defaults() {
+        let c = Config::default();
+        assert!(c.claude_prompt.contains("Rebase"));
+        assert!(c.claude_worktree);
+        assert!(c.claude_args.is_empty());
+        assert!(!c.repo_roots.is_empty());
+    }
+
+    #[test]
+    fn rejects_empty_claude_prompt() {
+        let c = Config {
+            claude_prompt: "  ".into(),
+            ..Config::default()
+        };
+        assert!(c.validate().is_err());
     }
 
     #[test]

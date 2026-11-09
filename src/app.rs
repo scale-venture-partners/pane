@@ -1,3 +1,4 @@
+use crate::claude;
 use crate::config::Config;
 use crate::gh::{self, ActionReq, Detail, Item, Op, Snapshot};
 use ratatui::crossterm::event::{
@@ -26,6 +27,7 @@ pub enum Msg {
     Detail(String, Result<Detail, String>),
     Diff(String, Result<String, String>),
     ActionDone(Result<String, String>),
+    ClaudeDone(usize, Result<claude::Outcome, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +41,28 @@ pub enum Mode {
     Filter,
     Comment,
     Confirm(Op),
+    /// Editing the prompt for the Claude action.
+    Claude,
+    /// Listing Claude runs.
+    Runs,
     Help,
+}
+
+pub enum RunState {
+    Running,
+    Done(i32),
+    Failed(String),
+}
+
+pub struct ClaudeRun {
+    pub id: usize,
+    pub item_id: String,
+    pub repo: String,
+    pub number: u64,
+    pub started: Instant,
+    pub state: RunState,
+    pub log: std::path::PathBuf,
+    pub kept_worktree: Option<std::path::PathBuf>,
 }
 
 pub struct Status {
@@ -75,6 +98,8 @@ pub struct App {
     pub file_rows: Vec<u16>,
     /// The selected item after it left the open list; kept on screen until you move off it.
     pub ghost: Option<Item>,
+    pub runs: Vec<ClaudeRun>,
+    next_run: usize,
     pub fresh: HashSet<String>,
     seen: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub last_ok: Option<Instant>,
@@ -140,6 +165,8 @@ impl App {
             diff_row: 0,
             file_rows: vec![],
             ghost: None,
+            runs: vec![],
+            next_run: 0,
             fresh: HashSet::new(),
             seen: HashMap::new(),
             last_ok: None,
@@ -175,6 +202,87 @@ impl App {
         self.last_ok = Some(now);
         self.loading = false;
         self.ensure_selection();
+    }
+
+    pub fn running_count(&self) -> usize {
+        self.runs
+            .iter()
+            .filter(|r| matches!(r.state, RunState::Running))
+            .count()
+    }
+
+    pub fn is_busy(&self, item_id: &str) -> bool {
+        self.runs
+            .iter()
+            .any(|r| r.item_id == item_id && matches!(r.state, RunState::Running))
+    }
+
+    fn start_claude(&mut self, task: String) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if self.is_busy(&item.id) {
+            self.set_status("claude is already running on this PR", true);
+            return;
+        }
+        let id = self.next_run;
+        self.next_run += 1;
+        let log = claude::log_path(&item);
+        self.runs.push(ClaudeRun {
+            id,
+            item_id: item.id.clone(),
+            repo: item.repo.clone(),
+            number: item.number,
+            started: Instant::now(),
+            state: RunState::Running,
+            log: log.clone(),
+            kept_worktree: None,
+        });
+        self.set_status(
+            format!(
+                "claude started on {}#{} (t lists runs)",
+                item.repo, item.number
+            ),
+            false,
+        );
+        let (tx, cfg) = (self.tx.clone(), self.cfg.clone());
+        tokio::spawn(async move {
+            let r = claude::run(cfg, item, task, log)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::ClaudeDone(id, r));
+        });
+    }
+
+    fn on_claude_done(&mut self, id: usize, result: Result<claude::Outcome, String>) {
+        let Some(run) = self.runs.iter_mut().find(|r| r.id == id) else {
+            return;
+        };
+        let what = format!("{}#{}", run.repo, run.number);
+        match result {
+            Ok(out) => {
+                run.state = RunState::Done(out.code);
+                run.kept_worktree = out.kept_worktree.clone();
+                let kept = out
+                    .kept_worktree
+                    .map(|p| format!(" (worktree kept: {})", p.display()))
+                    .unwrap_or_default();
+                if out.code == 0 {
+                    self.set_status(format!("claude finished on {what}{kept}"), false);
+                    self.refresh.notify_one();
+                } else {
+                    let code = out.code;
+                    self.set_status(
+                        format!("claude exited {code} on {what}{kept}; t shows the log"),
+                        true,
+                    );
+                }
+            }
+            Err(e) => {
+                run.state = RunState::Failed(e.clone());
+                self.set_status(format!("claude could not run on {what}: {e}"), true);
+            }
+        }
     }
 
     pub fn spinner(&self) -> &'static str {
@@ -432,6 +540,7 @@ impl App {
                 self.refresh.notify_one();
             }
             Msg::ActionDone(Err(e)) => self.set_status(e, true),
+            Msg::ClaudeDone(id, r) => self.on_claude_done(id, r),
         }
         !tick || self.tick_needs_redraw()
     }
@@ -442,6 +551,7 @@ impl App {
             || self.loading
             || !self.inflight.is_empty()
             || !self.diff_inflight.is_empty()
+            || self.running_count() > 0
             || self.frame.is_multiple_of(10)
     }
 
@@ -558,7 +668,8 @@ impl App {
             Mode::Filter => self.on_key_filter(k),
             Mode::Comment => self.on_key_comment(k),
             Mode::Confirm(_) => self.on_key_confirm(k),
-            Mode::Help => self.mode = Mode::Normal,
+            Mode::Claude => self.on_key_claude(k),
+            Mode::Runs | Mode::Help => self.mode = Mode::Normal,
         }
     }
 
@@ -589,6 +700,27 @@ impl App {
                 self.mode = Mode::Normal;
                 if !body.trim().is_empty() {
                     self.run(Op::Comment(body));
+                }
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Char(c) => self.input.push(c),
+            _ => {}
+        }
+    }
+
+    fn on_key_claude(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc => {
+                self.input.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => {
+                let task = std::mem::take(&mut self.input);
+                self.mode = Mode::Normal;
+                if !task.trim().is_empty() {
+                    self.start_claude(task);
                 }
             }
             KeyCode::Backspace => {
@@ -725,6 +857,17 @@ impl App {
                     self.mode = Mode::Comment;
                 }
             }
+            KeyCode::Char('C') if is_pr => {
+                if self.demo {
+                    self.set_status("demo mode: Claude is disabled", true);
+                } else if self.ghost_selected() {
+                    self.set_status("no longer open: nothing to do", true);
+                } else if self.selected.is_some() {
+                    self.input = self.cfg.claude_prompt.clone();
+                    self.mode = Mode::Claude;
+                }
+            }
+            KeyCode::Char('t') => self.mode = Mode::Runs,
             KeyCode::Char('x') => self.confirm(Op::Close),
             KeyCode::Char('a') if is_pr => self.confirm(Op::Approve),
             KeyCode::Char('M') if is_pr => {
@@ -831,6 +974,8 @@ mod tests {
             ci: Ci::None,
             gone: None,
             labels: vec![],
+            head: String::new(),
+            base: String::new(),
         }
     }
 
@@ -1069,5 +1214,120 @@ mod tests {
         };
         app.update(Msg::List(Ok(back)));
         assert!(app.ghost.is_none());
+    }
+
+    #[tokio::test]
+    async fn claude_key_prefills_prompt_and_esc_cancels() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('C'));
+        assert!(matches!(app.mode, Mode::Claude));
+        assert_eq!(app.input, Config::default().claude_prompt);
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_prompt_is_editable() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('C'));
+        for _ in 0..app.input.len() {
+            press(&mut app, KeyCode::Backspace);
+        }
+        press(&mut app, KeyCode::Char('h'));
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.input, "hi");
+    }
+
+    #[tokio::test]
+    async fn claude_is_pr_only_and_blocked_in_demo_and_on_ghosts() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('C'));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        let mut app = loaded_app();
+        app.demo = true;
+        press(&mut app, KeyCode::Char('C'));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.status.as_ref().is_some_and(|s| s.error));
+
+        let mut app = loaded_app();
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![item("a", 1, 1), item("a", 2, 2)],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        assert!(app.ghost_selected());
+        press(&mut app, KeyCode::Char('C'));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[tokio::test]
+    async fn starting_claude_records_a_run_and_blocks_duplicates() {
+        let cfg = Config {
+            repo_roots: vec![],
+            ..Config::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(cfg, tx, Arc::new(Notify::new()));
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![item("a", 1, 1)],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        app.start_claude("do it".into());
+        assert_eq!(app.running_count(), 1);
+        assert!(app.is_busy("a1"));
+        app.start_claude("again".into());
+        assert_eq!(app.runs.len(), 1);
+        assert!(app.status.as_ref().is_some_and(|s| s.error));
+
+        let Some(Msg::ClaudeDone(id, r)) = rx.recv().await else {
+            panic!("no completion")
+        };
+        assert!(
+            r.is_err(),
+            "no repo_roots, so the checkout lookup must fail"
+        );
+        app.update(Msg::ClaudeDone(id, r));
+        assert!(!app.is_busy("a1"));
+        assert!(matches!(app.runs[0].state, RunState::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn completion_states_set_status() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
+        let run = |id| ClaudeRun {
+            id,
+            item_id: "x".into(),
+            repo: "r".into(),
+            number: 1,
+            started: Instant::now(),
+            state: RunState::Running,
+            log: "/tmp/x.log".into(),
+            kept_worktree: None,
+        };
+        app.runs = vec![run(0), run(1)];
+        app.update(Msg::ClaudeDone(
+            0,
+            Ok(claude::Outcome {
+                code: 0,
+                kept_worktree: None,
+            }),
+        ));
+        assert!(app.status.as_ref().is_some_and(|s| !s.error));
+        app.update(Msg::ClaudeDone(
+            1,
+            Ok(claude::Outcome {
+                code: 2,
+                kept_worktree: Some("/tmp/wt".into()),
+            }),
+        ));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|s| s.error && s.text.contains("exited 2") && s.text.contains("/tmp/wt")));
     }
 }

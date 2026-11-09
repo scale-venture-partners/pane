@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, Tab};
+use crate::app::{App, Mode, RunState, Tab};
 use crate::detail::{self, DetailView};
 use crate::gh::{Ci, Item, Kind, Label};
 use chrono::Utc;
@@ -125,8 +125,16 @@ fn fit_chips(labels: &[Label], budget: usize) -> (Vec<Span<'static>>, usize) {
     (out, 0)
 }
 
-fn item_line(i: &Item, fresh: bool, width: usize, show_author: bool) -> Line<'static> {
-    let mut spans = vec![if fresh {
+fn item_line(
+    i: &Item,
+    fresh: bool,
+    width: usize,
+    show_author: bool,
+    busy: Option<&'static str>,
+) -> Line<'static> {
+    let mut spans = vec![if let Some(glyph) = busy {
+        Span::styled(glyph, Color::Magenta)
+    } else if fresh {
         Span::styled("◆", Color::Magenta)
     } else {
         Span::raw(" ")
@@ -204,6 +212,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if matches!(app.mode, Mode::Help) {
         draw_help(f, area);
     }
+    if matches!(app.mode, Mode::Runs) {
+        draw_runs(f, app, area);
+    }
 }
 
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
@@ -248,7 +259,15 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         Span::styled(format!("{} loading…", app.spinner()), Color::Yellow)
     };
-    let mut right = vec![sync];
+    let mut right = vec![];
+    let running = app.running_count();
+    if running > 0 {
+        right.push(Span::styled(
+            format!("{} {running} claude   ", app.spinner()),
+            Color::Magenta,
+        ));
+    }
+    right.push(sync);
     if app.fetch_error.is_some() {
         if let Some(t) = app.last_ok {
             right.push(Span::styled(
@@ -305,7 +324,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             sel_row = Some(rows.len());
         }
         let fresh = app.fresh.contains(&i.id);
-        rows.push(ListItem::new(item_line(i, fresh, width, show_author)));
+        let busy = app.is_busy(&i.id).then(|| app.spinner());
+        rows.push(ListItem::new(item_line(i, fresh, width, show_author, busy)));
         ids.push(Some(i.id.clone()));
     }
     app.row_ids = ids;
@@ -517,6 +537,21 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("█", DIM),
             Span::styled("   enter keep · esc clear", DIM),
         ]),
+        Mode::Claude => {
+            let room = (area.width as usize).saturating_sub(34);
+            let shown = if app.input.chars().count() > room {
+                let skip = app.input.chars().count() - room;
+                format!("…{}", app.input.chars().skip(skip + 1).collect::<String>())
+            } else {
+                app.input.clone()
+            };
+            Line::from(vec![
+                Span::styled(" claude› ", Style::new().bold().fg(Color::Magenta)),
+                Span::raw(shown),
+                Span::styled("█", DIM),
+                Span::styled("   enter run · esc cancel", DIM),
+            ])
+        }
         Mode::Comment => Line::from(vec![
             Span::styled(" comment: ", Color::Cyan),
             Span::raw(app.input.clone()),
@@ -558,7 +593,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     ("m", "mine"),
                 ];
                 if app.tab == Tab::Prs {
-                    p.extend([("a", "approve"), ("M", "merge")]);
+                    p.extend([("a", "approve"), ("M", "merge"), ("C", "claude")]);
                 }
                 p.extend([("c", "comment"), ("?", "help")]);
                 Line::from(keys(&p))
@@ -566,6 +601,55 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         },
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_runs(f: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = vec![];
+    for r in app.runs.iter().rev() {
+        let (glyph, color, what) = match &r.state {
+            RunState::Running => (
+                app.spinner().to_string(),
+                Color::Magenta,
+                "running".to_string(),
+            ),
+            RunState::Done(0) => ("✓".into(), Color::Green, "finished".to_string()),
+            RunState::Done(c) => ("✗".into(), Color::Red, format!("exited {c}")),
+            RunState::Failed(e) => ("✗".into(), Color::Red, truncate(e, 60)),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {glyph} "), color),
+            Span::styled(format!("{}#{}", r.repo, r.number), Style::new().bold()),
+            Span::styled(format!("  {what}  {}s", r.started.elapsed().as_secs()), DIM),
+        ]));
+        lines.push(Line::styled(format!("   {}", r.log.display()), DIM));
+        if let Some(p) = &r.kept_worktree {
+            lines.push(Line::styled(
+                format!("   worktree kept: {}", p.display()),
+                Color::Yellow,
+            ));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(" no Claude runs yet: press C on a PR", DIM));
+    }
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let w = 96.min(area.width);
+    let r = Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, r);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Color::Magenta)
+                .title(" claude runs "),
+        ),
+        r,
+    );
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -590,6 +674,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("D", "toggle draft (confirm)"),
         ("x", "close (confirm)"),
         ("c", "comment"),
+        ("C", "run claude on the PR (edit prompt first)"),
+        ("t", "list claude runs"),
         ("q", "quit"),
     ];
     let lines: Vec<Line> = rows
@@ -647,6 +733,8 @@ mod tests {
             ci,
             gone: None,
             labels: vec![],
+            head: String::new(),
+            base: String::new(),
         }
     }
 
@@ -936,10 +1024,10 @@ mod tests {
     fn row_shows_labels_without_exceeding_width() {
         let item = labeled(1, &["bug", "needs-review", "a-very-long-label-name-indeed"]);
         for width in [60usize, 80, 120] {
-            let line = item_line(&item, false, width, true);
+            let line = item_line(&item, false, width, true, None);
             assert!(line.width() <= width, "width {width}: {}", line.width());
         }
-        let wide = item_line(&item, false, 120, true);
+        let wide = item_line(&item, false, 120, true, None);
         let text: String = wide.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("bug"));
         assert!(text.contains("Add feature number 1"));
@@ -947,7 +1035,7 @@ mod tests {
 
     #[test]
     fn narrow_rows_skip_labels() {
-        let line = item_line(&labeled(1, &["bug"]), false, 50, true);
+        let line = item_line(&labeled(1, &["bug"]), false, 50, true, None);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("bug"));
     }
@@ -961,5 +1049,82 @@ mod tests {
         }];
         let out = render(&mut app, 130, 30);
         assert!(out.contains("needs-review"));
+    }
+
+    #[tokio::test]
+    async fn claude_prompt_line_shows_the_editable_prompt() {
+        let mut app = app_with_items();
+        app.mode = Mode::Claude;
+        app.input = "rebase and fix checks".into();
+        let out = render(&mut app, 120, 20);
+        assert!(out.contains("claude› rebase and fix checks"));
+        assert!(out.contains("enter run"));
+    }
+
+    #[tokio::test]
+    async fn long_prompts_keep_the_cursor_end_visible() {
+        let mut app = app_with_items();
+        app.mode = Mode::Claude;
+        app.input = format!("{} THE-END", "word ".repeat(60));
+        let out = render(&mut app, 80, 20);
+        assert!(out.contains("THE-END"));
+    }
+
+    #[tokio::test]
+    async fn header_and_rows_show_running_claude() {
+        use crate::app::ClaudeRun;
+        let mut app = app_with_items();
+        app.runs.push(ClaudeRun {
+            id: 0,
+            item_id: "id1".into(),
+            repo: "tool".into(),
+            number: 1,
+            started: std::time::Instant::now(),
+            state: RunState::Running,
+            log: "/tmp/a.log".into(),
+            kept_worktree: None,
+        });
+        let out = render(&mut app, 120, 20);
+        assert!(out.contains("1 claude"));
+    }
+
+    #[tokio::test]
+    async fn runs_overlay_lists_states_and_logs() {
+        use crate::app::ClaudeRun;
+        let mut app = app_with_items();
+        let mk = |id, state| ClaudeRun {
+            id,
+            item_id: format!("id{id}"),
+            repo: "tool".into(),
+            number: id as u64,
+            started: std::time::Instant::now(),
+            state,
+            log: format!("/tmp/run{id}.log").into(),
+            kept_worktree: None,
+        };
+        app.runs = vec![
+            mk(1, RunState::Done(0)),
+            ClaudeRun {
+                kept_worktree: Some("/repo/.claude/worktrees/w".into()),
+                ..mk(2, RunState::Done(3))
+            },
+            mk(3, RunState::Failed("no local clone".into())),
+        ];
+        app.mode = Mode::Runs;
+        let out = render(&mut app, 120, 30);
+        assert!(out.contains("claude runs"));
+        assert!(out.contains("finished"));
+        assert!(out.contains("exited 3"));
+        assert!(out.contains("no local clone"));
+        assert!(out.contains("/tmp/run2.log"));
+        assert!(out.contains("worktree kept: /repo/.claude/worktrees/w"));
+    }
+
+    #[tokio::test]
+    async fn empty_runs_overlay_explains_itself() {
+        let mut app = app_with_items();
+        app.mode = Mode::Runs;
+        let out = render(&mut app, 120, 20);
+        assert!(out.contains("no Claude runs yet"));
     }
 }
