@@ -180,6 +180,8 @@ pub async fn run_command(
 
 pub struct Outcome {
     pub code: i32,
+    /// Claude's final message, taken from the log.
+    pub summary: Option<String>,
     /// Set when the run's worktree still holds uncommitted or unpushed work.
     pub kept_worktree: Option<PathBuf>,
 }
@@ -253,6 +255,19 @@ pub fn cleanup_worktree(repo: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Claude's reply from a run log: the text after the output marker, minus pane's own trailer
+/// and the `⚠` auth notices claude prints first.
+pub fn extract_summary(log_text: &str) -> Option<String> {
+    let out = log_text.split("--- output ---\n").nth(1)?;
+    let out = out.split("\n--- pane ---").next()?;
+    let lines: Vec<&str> = out
+        .lines()
+        .skip_while(|l| l.starts_with('⚠') || l.trim().is_empty())
+        .collect();
+    let text = lines.join("\n").trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 /// Locates the checkout, runs `claude -p` there, then tidies up its worktree.
 pub async fn run(cfg: Config, item: Item, task: String, log: PathBuf) -> Result<Outcome> {
     let (roots, repo_full) = (cfg.repo_roots.clone(), item.repo_full.clone());
@@ -262,6 +277,9 @@ pub async fn run(cfg: Config, item: Item, task: String, log: PathBuf) -> Result<
     }
     let prompt = build_prompt(&item, &task, cfg.claude_worktree);
     let code = run_command("claude", &command_args(&cfg, &item), &dir, &prompt, &log).await?;
+    let summary = std::fs::read_to_string(&log)
+        .ok()
+        .and_then(|t| extract_summary(&t));
 
     let mut kept_worktree = None;
     if cfg.claude_worktree {
@@ -282,6 +300,7 @@ pub async fn run(cfg: Config, item: Item, task: String, log: PathBuf) -> Result<
     }
     Ok(Outcome {
         code,
+        summary,
         kept_worktree,
     })
 }
@@ -332,6 +351,21 @@ mod tests {
                 .success();
             assert!(ok, "git {args:?}");
         }
+    }
+
+    #[test]
+    fn summary_skips_auth_notice_and_trailer() {
+        let log = "$ cd x && claude -p\n\n--- prompt ---\nhello\n--- output ---\n⚠ claude.ai connectors are disabled\nThe rebase stopped.\n\nNeed write access.\n\n--- pane ---\nworktree kept";
+        assert_eq!(
+            extract_summary(log).unwrap(),
+            "The rebase stopped.\n\nNeed write access."
+        );
+    }
+
+    #[test]
+    fn summary_is_none_without_output() {
+        assert_eq!(extract_summary("--- output ---\n⚠ notice only\n"), None);
+        assert_eq!(extract_summary("no markers"), None);
     }
 
     #[test]

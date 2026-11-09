@@ -17,8 +17,9 @@ repos = ["octocat/hello-world"]
 # The Claude action (press r on a PR). The prompt can be edited before each run.
 claude_prompt = "Rebase this PR on its base branch and fix any failing checks."
 
-# Extra arguments passed to `claude`.
-# claude_args = ["--permission-mode", "acceptEdits"]
+# Extra arguments passed to `claude`. `claude -p` cannot ask for approval, so the default
+# lets it edit files. Use [] to rely only on your own Claude settings.
+claude_args = ["--permission-mode", "acceptEdits"]
 
 # Run each job in its own git worktree so your checkout is untouched.
 claude_worktree = true

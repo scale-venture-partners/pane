@@ -63,6 +63,7 @@ pub struct ClaudeRun {
     pub state: RunState,
     pub log: std::path::PathBuf,
     pub kept_worktree: Option<std::path::PathBuf>,
+    pub summary: Option<String>,
 }
 
 pub struct Status {
@@ -237,6 +238,7 @@ impl App {
             state: RunState::Running,
             log: log.clone(),
             kept_worktree: None,
+            summary: None,
         });
         self.set_status(
             format!(
@@ -263,19 +265,24 @@ impl App {
             Ok(out) => {
                 run.state = RunState::Done(out.code);
                 run.kept_worktree = out.kept_worktree.clone();
-                let kept = out
-                    .kept_worktree
-                    .map(|p| format!(" (worktree kept: {})", p.display()))
-                    .unwrap_or_default();
+                run.summary = out.summary.clone();
+                let head = out
+                    .summary
+                    .as_deref()
+                    .and_then(|s| s.lines().next())
+                    .map(|l| format!(": {}", crate::ui::truncate(l, 110)))
+                    .unwrap_or_else(|| " with no output (t shows the log)".to_string());
+                let kept = if out.kept_worktree.is_some() {
+                    " [work left in a worktree, see t]"
+                } else {
+                    ""
+                };
                 if out.code == 0 {
-                    self.set_status(format!("claude finished on {what}{kept}"), false);
+                    self.set_status(format!("claude done on {what}{head}{kept}"), false);
                     self.refresh.notify_one();
                 } else {
                     let code = out.code;
-                    self.set_status(
-                        format!("claude exited {code} on {what}{kept}; t shows the log"),
-                        true,
-                    );
+                    self.set_status(format!("claude exited {code} on {what}{head}{kept}"), true);
                 }
             }
             Err(e) => {
@@ -669,7 +676,15 @@ impl App {
             Mode::Comment => self.on_key_comment(k),
             Mode::Confirm(_) => self.on_key_confirm(k),
             Mode::Claude => self.on_key_claude(k),
-            Mode::Runs | Mode::Help => self.mode = Mode::Normal,
+            Mode::Runs => {
+                if k.code == KeyCode::Char('o') {
+                    if let Some(r) = self.runs.last() {
+                        open_url(&r.log.to_string_lossy());
+                    }
+                }
+                self.mode = Mode::Normal;
+            }
+            Mode::Help => self.mode = Mode::Normal,
         }
     }
 
@@ -1317,27 +1332,35 @@ mod tests {
             state: RunState::Running,
             log: "/tmp/x.log".into(),
             kept_worktree: None,
+            summary: None,
         };
         app.runs = vec![run(0), run(1)];
         app.update(Msg::ClaudeDone(
             0,
             Ok(claude::Outcome {
                 code: 0,
+                summary: Some("All checks fixed.\nDetails follow.".into()),
                 kept_worktree: None,
             }),
         ));
-        assert!(app.status.as_ref().is_some_and(|s| !s.error));
+        assert!(app.status.as_ref().is_some_and(|s| !s.error
+            && s.text.contains("All checks fixed.")
+            && !s.text.contains("Details")));
+        assert_eq!(
+            app.runs[0].summary.as_deref(),
+            Some("All checks fixed.\nDetails follow.")
+        );
         app.update(Msg::ClaudeDone(
             1,
             Ok(claude::Outcome {
                 code: 2,
+                summary: None,
                 kept_worktree: Some("/tmp/wt".into()),
             }),
         ));
-        assert!(app
-            .status
-            .as_ref()
-            .is_some_and(|s| s.error && s.text.contains("exited 2") && s.text.contains("/tmp/wt")));
+        assert!(app.status.as_ref().is_some_and(|s| s.error
+            && s.text.contains("exited 2")
+            && s.text.contains("work left in a worktree")));
     }
 
     #[tokio::test]

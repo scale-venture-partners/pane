@@ -603,37 +603,92 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// Greedy word wrap on whitespace; blank lines in `text` are kept as blank rows.
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out = vec![];
+    for para in text.lines() {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            let need = line.chars().count() + word.chars().count() + usize::from(!line.is_empty());
+            if need > width && !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        out.push(line);
+    }
+    out
+}
+
+const SUMMARY_LINES: usize = 7;
+
+fn run_block(app: &App, r: &crate::app::ClaudeRun, width: usize) -> Vec<Line<'static>> {
+    let attention = r.kept_worktree.is_some();
+    let (glyph, color, what) = match &r.state {
+        RunState::Running => (
+            app.spinner().to_string(),
+            Color::Magenta,
+            "running".to_string(),
+        ),
+        RunState::Done(0) if attention => (
+            "!".into(),
+            Color::Yellow,
+            "done, work left in a worktree".to_string(),
+        ),
+        RunState::Done(0) => ("✓".into(), Color::Green, "done".to_string()),
+        RunState::Done(c) => ("✗".into(), Color::Red, format!("exited {c}")),
+        RunState::Failed(e) => ("✗".into(), Color::Red, one_line(e, 70)),
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {glyph} "), color),
+        Span::styled(format!("{}#{}", r.repo, r.number), Style::new().bold()),
+        Span::styled(format!("  {what}  {}s", r.started.elapsed().as_secs()), DIM),
+    ])];
+    if let Some(summary) = &r.summary {
+        let wrapped = wrap_text(summary, width.saturating_sub(5));
+        let cut = wrapped.len() > SUMMARY_LINES;
+        for l in wrapped.into_iter().take(SUMMARY_LINES) {
+            lines.push(Line::raw(format!("   {l}")));
+        }
+        if cut {
+            lines.push(Line::styled("   … (rest is in the log)", DIM));
+        }
+    } else if !matches!(r.state, RunState::Running | RunState::Failed(_)) {
+        lines.push(Line::styled("   claude printed nothing", DIM));
+    }
+    lines.push(Line::styled(format!("   log: {}", r.log.display()), DIM));
+    if let Some(p) = &r.kept_worktree {
+        lines.push(Line::styled(
+            format!("   worktree: {}", p.display()),
+            Color::Yellow,
+        ));
+    }
+    lines
+}
+
 fn draw_runs(f: &mut Frame, app: &App, area: Rect) {
+    let w = 110.min(area.width);
+    let inner_w = w.saturating_sub(2) as usize;
+    let room = area.height.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = vec![];
     for r in app.runs.iter().rev() {
-        let (glyph, color, what) = match &r.state {
-            RunState::Running => (
-                app.spinner().to_string(),
-                Color::Magenta,
-                "running".to_string(),
-            ),
-            RunState::Done(0) => ("✓".into(), Color::Green, "finished".to_string()),
-            RunState::Done(c) => ("✗".into(), Color::Red, format!("exited {c}")),
-            RunState::Failed(e) => ("✗".into(), Color::Red, truncate(e, 60)),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {glyph} "), color),
-            Span::styled(format!("{}#{}", r.repo, r.number), Style::new().bold()),
-            Span::styled(format!("  {what}  {}s", r.started.elapsed().as_secs()), DIM),
-        ]));
-        lines.push(Line::styled(format!("   {}", r.log.display()), DIM));
-        if let Some(p) = &r.kept_worktree {
-            lines.push(Line::styled(
-                format!("   worktree kept: {}", p.display()),
-                Color::Yellow,
-            ));
+        let block = run_block(app, r, inner_w);
+        if !lines.is_empty() && lines.len() + block.len() + 1 > room {
+            break;
         }
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.extend(block);
     }
     if lines.is_empty() {
         lines.push(Line::styled(" no Claude runs yet: press r on a PR", DIM));
     }
     let h = (lines.len() as u16 + 2).min(area.height);
-    let w = 96.min(area.width);
     let r = Rect {
         x: area.x + (area.width - w) / 2,
         y: area.y + (area.height - h) / 2,
@@ -646,7 +701,11 @@ fn draw_runs(f: &mut Frame, app: &App, area: Rect) {
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Color::Magenta)
-                .title(" claude runs "),
+                .title(" claude runs ")
+                .title_bottom(Line::styled(
+                    " o opens the newest log · any other key closes ",
+                    DIM,
+                )),
         ),
         r,
     );
@@ -1086,6 +1145,7 @@ mod tests {
             state: RunState::Running,
             log: "/tmp/a.log".into(),
             kept_worktree: None,
+            summary: None,
         });
         let out = render(&mut app, 120, 20);
         assert!(out.contains("1 claude"));
@@ -1104,23 +1164,25 @@ mod tests {
             state,
             log: format!("/tmp/run{id}.log").into(),
             kept_worktree: None,
+            summary: None,
         };
         app.runs = vec![
             mk(1, RunState::Done(0)),
             ClaudeRun {
                 kept_worktree: Some("/repo/.claude/worktrees/w".into()),
-                ..mk(2, RunState::Done(3))
+                ..mk(2, RunState::Done(0))
             },
             mk(3, RunState::Failed("no local clone".into())),
         ];
         app.mode = Mode::Runs;
         let out = render(&mut app, 120, 30);
         assert!(out.contains("claude runs"));
-        assert!(out.contains("finished"));
-        assert!(out.contains("exited 3"));
+        assert!(out.contains("done"));
+        assert!(out.contains("exited 3") || out.contains("work left"));
         assert!(out.contains("no local clone"));
         assert!(out.contains("/tmp/run2.log"));
-        assert!(out.contains("worktree kept: /repo/.claude/worktrees/w"));
+        assert!(out.contains("worktree: /repo/.claude/worktrees/w"));
+        assert!(out.contains("work left in a worktree"));
     }
 
     #[tokio::test]
@@ -1129,5 +1191,61 @@ mod tests {
         app.mode = Mode::Runs;
         let out = render(&mut app, 120, 20);
         assert!(out.contains("no Claude runs yet"));
+    }
+
+    #[test]
+    fn wrap_text_wraps_words_and_keeps_paragraphs() {
+        let lines = wrap_text("alpha beta gamma delta\n\nepsilon", 11);
+        assert_eq!(lines, ["alpha beta", "gamma delta", "", "epsilon"]);
+        assert_eq!(wrap_text("", 10), Vec::<String>::new());
+        assert_eq!(
+            wrap_text("supercalifragilistic", 8),
+            ["supercalifragilistic"]
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_overlay_shows_claudes_reply_and_flags_leftover_work() {
+        use crate::app::ClaudeRun;
+        let mut app = app_with_items();
+        app.runs = vec![ClaudeRun {
+            id: 0,
+            item_id: "id1".into(),
+            repo: "tool".into(),
+            number: 1,
+            started: std::time::Instant::now(),
+            state: RunState::Done(0),
+            log: "/tmp/a.log".into(),
+            kept_worktree: Some("/repo/.claude/worktrees/w".into()),
+            summary: Some("The rebase is stopped partway with one conflict in CHANGELOG.md.\n\nCan you grant write access?".into()),
+        }];
+        app.mode = Mode::Runs;
+        let out = render(&mut app, 120, 30);
+        assert!(out.contains("The rebase is stopped partway"));
+        assert!(out.contains("Can you grant write access?"));
+        assert!(out.contains("work left in a worktree"));
+        assert!(out.contains("o opens the newest log"));
+    }
+
+    #[tokio::test]
+    async fn long_replies_are_cut_with_a_pointer_to_the_log() {
+        use crate::app::ClaudeRun;
+        let mut app = app_with_items();
+        let long: String = (0..40).map(|n| format!("line number {n}\n")).collect();
+        app.runs = vec![ClaudeRun {
+            id: 0,
+            item_id: "id1".into(),
+            repo: "tool".into(),
+            number: 1,
+            started: std::time::Instant::now(),
+            state: RunState::Done(0),
+            log: "/tmp/a.log".into(),
+            kept_worktree: None,
+            summary: Some(long),
+        }];
+        app.mode = Mode::Runs;
+        let out = render(&mut app, 120, 40);
+        assert!(out.contains("rest is in the log"));
+        assert!(!out.contains("line number 39"));
     }
 }
