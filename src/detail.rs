@@ -1,5 +1,6 @@
 //! Builds the right-hand detail view for a PR or issue as styled lines.
 
+use crate::app::{ClaudeRun, RunState};
 use crate::diff;
 use crate::gh::{Ci, Detail, Item, Kind};
 use crate::markdown;
@@ -166,12 +167,82 @@ fn stats_line(d: &Detail) -> Line<'static> {
     Line::from(spans)
 }
 
+const REPLY_LINES: usize = 14;
+
+fn short_duration(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3600),
+    }
+}
+
+/// The PR's Claude run: progress while it runs, Claude's reply and where to find the rest after.
+fn claude_section(run: &ClaudeRun, spinner: &str, width: usize) -> Vec<Line<'static>> {
+    let attention = run.kept_worktree.is_some();
+    let status = match &run.state {
+        RunState::Running => Span::styled(
+            format!(
+                "{spinner} running {}",
+                short_duration(run.started.elapsed().as_secs())
+            ),
+            Color::Magenta,
+        ),
+        RunState::Done(0) if attention => {
+            Span::styled("! done, work left in a worktree", Color::Yellow)
+        }
+        RunState::Done(0) => Span::styled("✓ done", Color::Green),
+        RunState::Done(c) => Span::styled(format!("✗ exited {c}"), Color::Red),
+        RunState::Failed(_) => Span::styled("✗ could not run", Color::Red),
+    };
+    let mut extra = vec![status];
+    if let Some(done) = run.finished {
+        extra.push(Span::styled(
+            format!("  {} ago", short_duration(done.elapsed().as_secs())),
+            DIM,
+        ));
+    }
+    let mut lines = vec![section("Claude", extra, width)];
+    lines.push(Line::from(vec![
+        Span::styled("› ", Color::Magenta),
+        Span::styled(run.prompt.clone(), Style::new().fg(DIM).italic()),
+    ]));
+    match &run.state {
+        RunState::Running => {}
+        RunState::Failed(e) => lines.push(Line::styled(e.clone(), Color::Red)),
+        RunState::Done(_) => {
+            lines.push(Line::raw(""));
+            match &run.summary {
+                Some(text) => {
+                    let md = markdown::render(text, width);
+                    let cut = md.len() > REPLY_LINES;
+                    lines.extend(md.into_iter().take(REPLY_LINES));
+                    if cut {
+                        lines.push(Line::styled("… rest of the reply is in the log", DIM));
+                    }
+                }
+                None => lines.push(Line::styled("claude printed nothing", DIM)),
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(format!("log: {}", run.log.display()), DIM));
+    if let Some(p) = &run.kept_worktree {
+        lines.push(Line::styled(
+            format!("worktree kept: {}", p.display()),
+            Color::Yellow,
+        ));
+    }
+    lines
+}
+
 pub fn build(
     item: &Item,
     d: &Detail,
     diff_text: Option<&str>,
     diff_err: Option<&str>,
     width: usize,
+    claude: Option<(&ClaudeRun, &str)>,
 ) -> DetailView {
     let mut t: Vec<Line<'static>> = vec![];
     let mut check_lines = vec![];
@@ -182,6 +253,10 @@ pub fn build(
     t.push(Line::raw(""));
     t.push(badges(item, d));
     t.push(Line::raw(""));
+    if let Some((run, spinner)) = claude {
+        t.extend(claude_section(run, spinner, width));
+        t.push(Line::raw(""));
+    }
 
     let mut meta = vec![Span::styled(format!("@{}", item.author), Color::Blue)];
     let opened = ago(&d.created_at);

@@ -68,7 +68,6 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | `a` `m` `x` `w` | approve, merge, close, toggle draft (each confirms) |
 | `c` | comment |
 | `r` | repair: run Claude on the PR (edit the prompt, Enter to run) |
-| `t` | list Claude runs |
 | `q` | quit |
 
 ## Configuration
@@ -94,7 +93,11 @@ When both `orgs` and `repos` are empty, pane shows items that involve you.
 
 ## Repairing a PR with Claude
 
-Press `r` (repair) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background; the PR row shows a spinner and the header counts running jobs. When a job finishes, the status bar shows the first line of what Claude said. `t` lists every run with Claude's full reply (cut to a few lines), the log path, and a warning if it left work behind; `o` there opens the newest log.
+Press `r` (repair) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background and opens the PR's details, where a **Claude** section at the top shows progress while it runs and Claude's reply, the log path and any leftover worktree afterwards. The PR row shows a spinner while it works, and the status bar shows the first line of the reply when it finishes.
+
+Each PR has at most one run at a time; starting another after one finishes replaces its result.
+
+![A finished Claude run shown at the top of a PR](docs/screenshots/repair.png)
 
 - **Your Claude setup:** the job inherits your environment and runs `claude` exactly as you would, so your global settings, credentials, hooks and permission rules apply. `claude -p` has nobody to approve prompts, so pane passes `--permission-mode auto` by default: Claude's auto mode approves routine actions (editing files, running git) on its own, while risky ones are still blocked, and the run then ends with Claude explaining what it was blocked on. Change this with `claude_args` (for example `["--permission-mode", "acceptEdits"]` to be stricter, or `[]` to use only your own settings).
 - **Where it runs:** in your local clone of the repo, found by matching `origin` against the PR's repository under `repo_roots`.
@@ -102,7 +105,7 @@ Press `r` (repair) on a PR, adjust the prompt if you like, and press Enter. pane
 - **Context:** the prompt is prefixed with the PR number, title, URL, and head and base branches.
 - **Logs:** `~/.local/state/pane/claude/` (or `$XDG_STATE_HOME/pane/claude/`), one file per run with the full prompt and output.
 
-Jobs keep running if you quit pane.
+Jobs keep running if you quit pane; their logs are still written.
 
 ## Rate limits
 

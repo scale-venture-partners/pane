@@ -48,7 +48,10 @@ def convert(data, title):
     token = re.compile(r"\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[A-Za-z]|([^\x1b]+)")
     for m in token.finditer(data):
         if m.group(2) is not None:
-            out.append('<span style="%s">%s</span>' % (style(), html.escape(m.group(2))))
+            text = html.escape(m.group(2))
+            # Braille spinner glyphs fall back to a font with a different width; pin them to one cell.
+            text = re.sub("([\u2800-\u28ff])", r'<span style="display:inline-block;width:1ch;text-align:center">\1</span>', text)
+            out.append('<span style="%s">%s</span>' % (style(), text))
             continue
         if m.group(1) is None:
             continue

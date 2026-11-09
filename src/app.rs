@@ -27,7 +27,7 @@ pub enum Msg {
     Detail(String, Result<Detail, String>),
     Diff(String, Result<String, String>),
     ActionDone(Result<String, String>),
-    ClaudeDone(usize, Result<claude::Outcome, String>),
+    ClaudeDone(String, Result<claude::Outcome, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,8 +43,6 @@ pub enum Mode {
     Confirm(Op),
     /// Editing the prompt for the Claude action.
     Claude,
-    /// Listing Claude runs.
-    Runs,
     Help,
 }
 
@@ -54,12 +52,13 @@ pub enum RunState {
     Failed(String),
 }
 
+/// The Claude run for one PR. A PR has at most one at a time; a new run replaces the old result.
 pub struct ClaudeRun {
-    pub id: usize,
-    pub item_id: String,
     pub repo: String,
     pub number: u64,
+    pub prompt: String,
     pub started: Instant,
+    pub finished: Option<Instant>,
     pub state: RunState,
     pub log: std::path::PathBuf,
     pub kept_worktree: Option<std::path::PathBuf>,
@@ -99,8 +98,8 @@ pub struct App {
     pub file_rows: Vec<u16>,
     /// The selected item after it left the open list; kept on screen until you move off it.
     pub ghost: Option<Item>,
-    pub runs: Vec<ClaudeRun>,
-    next_run: usize,
+    /// Keyed by item id.
+    pub runs: HashMap<String, ClaudeRun>,
     pub fresh: HashSet<String>,
     seen: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub last_ok: Option<Instant>,
@@ -166,8 +165,7 @@ impl App {
             diff_row: 0,
             file_rows: vec![],
             ghost: None,
-            runs: vec![],
-            next_run: 0,
+            runs: HashMap::new(),
             fresh: HashSet::new(),
             seen: HashMap::new(),
             last_ok: None,
@@ -192,11 +190,17 @@ impl App {
         let snap = crate::demo::snapshot();
         let mut details = crate::demo::details(&snap);
         let diffs = crate::demo::diffs(&snap, &mut details);
+        let snap_for_runs = crate::gh::Snapshot {
+            prs: snap.prs.clone(),
+            issues: vec![],
+            rate_remaining: None,
+        };
         self.demo = true;
         self.viewer = Some("mira-k".into());
         self.rate = snap.rate_remaining;
         self.prs = snap.prs;
         self.issues = snap.issues;
+        self.runs = crate::demo::runs(&snap_for_runs);
         self.details = details;
         let now = Instant::now();
         self.diffs = diffs.into_iter().map(|(k, v)| (k, (now, v))).collect();
@@ -207,15 +211,15 @@ impl App {
 
     pub fn running_count(&self) -> usize {
         self.runs
-            .iter()
+            .values()
             .filter(|r| matches!(r.state, RunState::Running))
             .count()
     }
 
     pub fn is_busy(&self, item_id: &str) -> bool {
         self.runs
-            .iter()
-            .any(|r| r.item_id == item_id && matches!(r.state, RunState::Running))
+            .get(item_id)
+            .is_some_and(|r| matches!(r.state, RunState::Running))
     }
 
     fn start_claude(&mut self, task: String) {
@@ -226,28 +230,23 @@ impl App {
             self.set_status("claude is already running on this PR", true);
             return;
         }
-        let id = self.next_run;
-        self.next_run += 1;
         let log = claude::log_path(&item);
-        self.runs.push(ClaudeRun {
-            id,
-            item_id: item.id.clone(),
-            repo: item.repo.clone(),
-            number: item.number,
-            started: Instant::now(),
-            state: RunState::Running,
-            log: log.clone(),
-            kept_worktree: None,
-            summary: None,
-        });
-        self.set_status(
-            format!(
-                "claude started on {}#{} (t lists runs)",
-                item.repo, item.number
-            ),
-            false,
+        self.runs.insert(
+            item.id.clone(),
+            ClaudeRun {
+                repo: item.repo.clone(),
+                number: item.number,
+                prompt: task.clone(),
+                started: Instant::now(),
+                finished: None,
+                state: RunState::Running,
+                log: log.clone(),
+                kept_worktree: None,
+                summary: None,
+            },
         );
-        let (tx, cfg) = (self.tx.clone(), self.cfg.clone());
+        self.open_detail();
+        let (tx, cfg, id) = (self.tx.clone(), self.cfg.clone(), item.id.clone());
         tokio::spawn(async move {
             let r = claude::run(cfg, item, task, log)
                 .await
@@ -256,10 +255,11 @@ impl App {
         });
     }
 
-    fn on_claude_done(&mut self, id: usize, result: Result<claude::Outcome, String>) {
-        let Some(run) = self.runs.iter_mut().find(|r| r.id == id) else {
+    fn on_claude_done(&mut self, item_id: String, result: Result<claude::Outcome, String>) {
+        let Some(run) = self.runs.get_mut(&item_id) else {
             return;
         };
+        run.finished = Some(Instant::now());
         let what = format!("{}#{}", run.repo, run.number);
         match result {
             Ok(out) => {
@@ -271,18 +271,13 @@ impl App {
                     .as_deref()
                     .and_then(|s| s.lines().next())
                     .map(|l| format!(": {}", crate::ui::truncate(l, 110)))
-                    .unwrap_or_else(|| " with no output (t shows the log)".to_string());
-                let kept = if out.kept_worktree.is_some() {
-                    " [work left in a worktree, see t]"
-                } else {
-                    ""
-                };
+                    .unwrap_or_default();
                 if out.code == 0 {
-                    self.set_status(format!("claude done on {what}{head}{kept}"), false);
+                    self.set_status(format!("claude done on {what}{head}"), false);
                     self.refresh.notify_one();
                 } else {
                     let code = out.code;
-                    self.set_status(format!("claude exited {code} on {what}{head}{kept}"), true);
+                    self.set_status(format!("claude exited {code} on {what}{head}"), true);
                 }
             }
             Err(e) => {
@@ -676,14 +671,6 @@ impl App {
             Mode::Comment => self.on_key_comment(k),
             Mode::Confirm(_) => self.on_key_confirm(k),
             Mode::Claude => self.on_key_claude(k),
-            Mode::Runs => {
-                if k.code == KeyCode::Char('o') {
-                    if let Some(r) = self.runs.last() {
-                        open_url(&r.log.to_string_lossy());
-                    }
-                }
-                self.mode = Mode::Normal;
-            }
             Mode::Help => self.mode = Mode::Normal,
         }
     }
@@ -891,7 +878,6 @@ impl App {
                     self.mode = Mode::Claude;
                 }
             }
-            KeyCode::Char('t') => self.mode = Mode::Runs,
             KeyCode::Char('x') => self.confirm(Op::Close),
             KeyCode::Char('a') if is_pr => self.confirm(Op::Approve),
             KeyCode::Char('m') if is_pr => {
@@ -1287,56 +1273,95 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal));
     }
 
-    #[tokio::test]
-    async fn starting_claude_records_a_run_and_blocks_duplicates() {
+    fn no_checkout_app() -> (App, tokio::sync::mpsc::UnboundedReceiver<Msg>) {
         let cfg = Config {
             repo_roots: vec![],
             ..Config::default()
         };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(cfg, tx, Arc::new(Notify::new()));
         app.update(Msg::List(Ok(Snapshot {
-            prs: vec![item("a", 1, 1)],
+            prs: vec![item("a", 1, 1), item("a", 2, 2)],
             issues: vec![],
             rate_remaining: None,
         })));
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn starting_claude_records_one_run_per_pr_and_opens_details() {
+        let (mut app, mut rx) = no_checkout_app();
+        assert!(!app.detail_open);
         app.start_claude("do it".into());
+        assert!(app.detail_open, "the run is shown in the PR view");
         assert_eq!(app.running_count(), 1);
-        assert!(app.is_busy("a1"));
+        assert!(app.is_busy("a2"));
+        assert_eq!(app.runs["a2"].prompt, "do it");
+
         app.start_claude("again".into());
         assert_eq!(app.runs.len(), 1);
+        assert_eq!(app.runs["a2"].prompt, "do it", "second start is refused");
         assert!(app.status.as_ref().is_some_and(|s| s.error));
 
         let Some(Msg::ClaudeDone(id, r)) = rx.recv().await else {
             panic!("no completion")
         };
+        assert_eq!(id, "a2");
         assert!(
             r.is_err(),
             "no repo_roots, so the checkout lookup must fail"
         );
         app.update(Msg::ClaudeDone(id, r));
-        assert!(!app.is_busy("a1"));
-        assert!(matches!(app.runs[0].state, RunState::Failed(_)));
+        assert!(!app.is_busy("a2"));
+        assert!(matches!(app.runs["a2"].state, RunState::Failed(_)));
+        assert!(app.runs["a2"].finished.is_some());
     }
 
     #[tokio::test]
-    async fn completion_states_set_status() {
+    async fn different_prs_can_run_at_once_and_a_finished_pr_can_rerun() {
+        let (mut app, _rx) = no_checkout_app();
+        app.start_claude("first".into());
+        press(&mut app, KeyCode::Char('j'));
+        app.start_claude("second".into());
+        assert_eq!(app.running_count(), 2);
+
+        app.update(Msg::ClaudeDone(
+            "a2".into(),
+            Ok(claude::Outcome {
+                code: 0,
+                summary: None,
+                kept_worktree: None,
+            }),
+        ));
+        assert_eq!(app.running_count(), 1);
+        press(&mut app, KeyCode::Char('k'));
+        app.start_claude("third".into());
+        assert_eq!(
+            app.runs["a2"].prompt, "third",
+            "a new run replaces the old result"
+        );
+        assert!(app.runs["a2"].summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn completion_states_set_status_and_store_results() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
-        let run = |id| ClaudeRun {
-            id,
-            item_id: "x".into(),
+        let run = || ClaudeRun {
             repo: "r".into(),
             number: 1,
+            prompt: "p".into(),
             started: Instant::now(),
+            finished: None,
             state: RunState::Running,
             log: "/tmp/x.log".into(),
             kept_worktree: None,
             summary: None,
         };
-        app.runs = vec![run(0), run(1)];
+        app.runs.insert("x".into(), run());
+        app.runs.insert("y".into(), run());
         app.update(Msg::ClaudeDone(
-            0,
+            "x".into(),
             Ok(claude::Outcome {
                 code: 0,
                 summary: Some("All checks fixed.\nDetails follow.".into()),
@@ -1347,20 +1372,32 @@ mod tests {
             && s.text.contains("All checks fixed.")
             && !s.text.contains("Details")));
         assert_eq!(
-            app.runs[0].summary.as_deref(),
+            app.runs["x"].summary.as_deref(),
             Some("All checks fixed.\nDetails follow.")
         );
         app.update(Msg::ClaudeDone(
-            1,
+            "y".into(),
             Ok(claude::Outcome {
                 code: 2,
                 summary: None,
                 kept_worktree: Some("/tmp/wt".into()),
             }),
         ));
-        assert!(app.status.as_ref().is_some_and(|s| s.error
-            && s.text.contains("exited 2")
-            && s.text.contains("work left in a worktree")));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|s| s.error && s.text.contains("exited 2")));
+        assert_eq!(
+            app.runs["y"].kept_worktree.as_deref(),
+            Some(std::path::Path::new("/tmp/wt"))
+        );
+    }
+
+    #[tokio::test]
+    async fn there_is_no_runs_list_key() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(app.mode, Mode::Normal));
     }
 
     #[tokio::test]

@@ -1,10 +1,11 @@
 //! Fictional data for `pane --demo`: lets anyone try the UI, and powers the README screenshots.
 
+use crate::app::{ClaudeRun, RunState};
 use crate::diff;
 use crate::gh::{parse_hex, Check, Ci, Comment, Detail, Item, Kind, Label, Snapshot};
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 
 const ORG: &str = "acme";
 
@@ -654,6 +655,55 @@ pub fn details(snap: &Snapshot) -> HashMap<String, Detail> {
     out
 }
 
+fn ago(secs: u64) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(StdDuration::from_secs(secs)).unwrap_or(now)
+}
+
+/// A finished Claude repair on one PR and a running one on another, keyed by item id.
+pub fn runs(snap: &Snapshot) -> HashMap<String, ClaudeRun> {
+    let id = |n: u64| {
+        snap.prs
+            .iter()
+            .find(|i| i.number == n)
+            .map(|i| i.id.clone())
+            .unwrap_or_default()
+    };
+    let prompt = "Rebase this PR on its base branch and fix any failing checks.";
+    let mut out = HashMap::new();
+    out.insert(
+        id(1207),
+        ClaudeRun {
+            repo: "lumen-web".into(),
+            number: 1207,
+            prompt: prompt.into(),
+            started: ago(260),
+            finished: Some(ago(70)),
+            state: RunState::Done(0),
+            log: "~/.local/state/pane/claude/lumen-web-pr1207-1794245349.log".into(),
+            kept_worktree: None,
+            summary: Some(
+                "Rebased `liam/settings-redesign` onto `main` (two conflicts in `SettingsPage.tsx`; kept both sets of changes) and fixed the failing **unit-tests** check:\n\n- `SettingsForm` called `useRouter` outside a provider, so I wrapped it in the test harness\n- updated 3 snapshots for the new layout\n\nAll 5 checks pass locally. Pushed with `--force-with-lease`.".into(),
+            ),
+        },
+    );
+    out.insert(
+        id(471),
+        ClaudeRun {
+            repo: "lumen-api".into(),
+            number: 471,
+            prompt: prompt.into(),
+            started: ago(75),
+            finished: None,
+            state: RunState::Running,
+            log: "~/.local/state/pane/claude/lumen-api-pr471-1794245401.log".into(),
+            kept_worktree: None,
+            summary: None,
+        },
+    );
+    out
+}
+
 /// Diffs keyed by item id; also fills in each detail's size counts from its diff.
 pub fn diffs(snap: &Snapshot, details: &mut HashMap<String, Detail>) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -677,6 +727,19 @@ pub fn diffs(snap: &Snapshot, details: &mut HashMap<String, Detail>) -> HashMap<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_runs_cover_one_finished_and_one_running() {
+        let snap = snapshot();
+        let runs = runs(&snap);
+        assert_eq!(runs.len(), 2);
+        let states: Vec<bool> = runs
+            .values()
+            .map(|r| matches!(r.state, RunState::Running))
+            .collect();
+        assert!(states.contains(&true) && states.contains(&false));
+        assert!(runs.keys().all(|k| !k.is_empty()));
+    }
 
     #[test]
     fn hunk_headers_count_lines() {
