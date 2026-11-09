@@ -16,6 +16,7 @@ First public version.
 - Merged or closed items stay on screen, marked, until you navigate away.
 - Repair action (`r`): runs `claude -p` in the background in your local clone, in an isolated git worktree, with an editable default prompt. The run's progress, reply, log path and any leftover worktree show in the PR's details. At most one run per PR.
 - CodeRabbit: an orange `CR n` chip for PRs with unresolved CodeRabbit threads, a CodeRabbit section in PR details with clickable threads, and `t` to have Claude work through them (shares the one-run-per-PR slot with repair).
+- Refresh state in the bottom bar: age of the data, countdown to the next refresh, progress while refreshing, and a retry countdown after a failure. Footer hints give way to it on narrow terminals.
 - Text filter (matches labels too), an "only mine" filter, mouse support.
 - `--demo` mode with fictional data, and `--check` to list what would be shown.
 - Optional config file for orgs, repos, refresh interval, merge method and the repair action.

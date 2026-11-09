@@ -263,15 +263,6 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::styled(format!("/{} ", app.filter), Color::Cyan));
     }
 
-    let sync = if app.loading {
-        Span::styled("refreshing…", Color::Yellow)
-    } else if let Some(err) = &app.fetch_error {
-        Span::styled(format!("fetch failed: {}", truncate(err, 60)), Color::Red)
-    } else if let Some(t) = app.last_ok {
-        Span::styled(format!("updated {}s ago", t.elapsed().as_secs()), DIM)
-    } else {
-        Span::styled(format!("{} loading…", app.spinner()), Color::Yellow)
-    };
     let mut right = vec![];
     let running = app.running_count();
     if running > 0 {
@@ -280,17 +271,21 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
             Color::Magenta,
         ));
     }
-    right.push(sync);
-    if app.fetch_error.is_some() {
+    if let Some(err) = &app.fetch_error {
+        right.push(Span::styled(
+            format!("fetch failed: {}", truncate(err, 60)),
+            Color::Red,
+        ));
         if let Some(t) = app.last_ok {
             right.push(Span::styled(
-                format!(" (data {}s old)", t.elapsed().as_secs()),
+                format!(" (data {} old)", short_duration(t.elapsed().as_secs())),
                 DIM,
             ));
         }
+        right.push(Span::styled("  ", DIM));
     }
     if let Some(r) = app.rate {
-        right.push(Span::styled(format!(" · api {r}"), DIM));
+        right.push(Span::styled(format!("api {r}"), DIM));
     }
     right.push(Span::raw(" "));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -558,6 +553,11 @@ fn keys(pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let right = if matches!(app.mode, Mode::Normal) {
+        refresh_spans(app)
+    } else {
+        vec![]
+    };
     let line = match &app.mode {
         Mode::Filter => Line::from(vec![
             Span::styled(" /", Color::Cyan),
@@ -609,7 +609,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         }
         _ => match &app.status {
             Some(s) => Line::styled(
-                format!(" {}", truncate(&s.text, area.width as usize - 2)),
+                format!(
+                    " {}",
+                    truncate(&s.text, reserve_for_status(area.width, &right))
+                ),
                 if s.error { Color::Red } else { Color::Green },
             ),
             None => {
@@ -631,11 +634,102 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     }
                 }
                 p.extend([("c", "comment"), ("?", "help")]);
-                Line::from(keys(&p))
+                let budget = (area.width as usize).saturating_sub(right_width(&right) + 2);
+                Line::from(keys(&fit_hints(&p, budget)))
             }
         },
     };
     f.render_widget(Paragraph::new(line), area);
+    if !right.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(right)).alignment(Alignment::Right),
+            area,
+        );
+    }
+}
+
+fn right_width(spans: &[Span]) -> usize {
+    if spans.is_empty() {
+        0
+    } else {
+        spans.iter().map(Span::width).sum::<usize>() + 1
+    }
+}
+
+fn reserve_for_status(width: u16, right: &[Span]) -> usize {
+    (width as usize).saturating_sub(right_width(right) + 3)
+}
+
+/// Keeps as many hints as fit in `budget` columns, dropping the least important first.
+/// Importance runs: help, open, move, repair, coderabbit, approve, merge, comment, then the rest.
+fn fit_hints<'a>(pairs: &[(&'a str, &'a str)], budget: usize) -> Vec<(&'a str, &'a str)> {
+    const ORDER: [&str; 9] = ["?", "enter", "↑↓", "r", "t", "a", "m", "c", "/"];
+    let rank = |k: &str| ORDER.iter().position(|o| *o == k).unwrap_or(ORDER.len());
+    let mut by_rank: Vec<usize> = (0..pairs.len()).collect();
+    by_rank.sort_by_key(|i| rank(pairs[*i].0));
+    let mut keep = vec![false; pairs.len()];
+    let mut used = 0;
+    for i in by_rank {
+        let w = pairs[i].0.chars().count() + pairs[i].1.chars().count() + 3;
+        if used + w > budget {
+            continue;
+        }
+        used += w;
+        keep[i] = true;
+    }
+    pairs
+        .iter()
+        .zip(keep)
+        .filter(|(_, k)| *k)
+        .map(|(p, _)| *p)
+        .collect()
+}
+
+/// Refresh state for the bottom bar: age of the data, time to the next refresh, or progress.
+fn refresh_spans(app: &App) -> Vec<Span<'static>> {
+    if app.demo {
+        return vec![Span::styled("demo data · no refresh ", DIM)];
+    }
+    if app.loading {
+        let what = match app.progress {
+            Some((done, total)) => format!("refreshing {done}/{total} "),
+            None => "refreshing ".to_string(),
+        };
+        return vec![Span::styled(
+            format!("{} {what}", app.spinner()),
+            Color::Yellow,
+        )];
+    }
+    let next = app
+        .next_refresh_in()
+        .map(|d| format!(" · next in {}", short_duration(d.as_secs())))
+        .unwrap_or_default();
+    if app.fetch_error.is_some() {
+        let retry = app
+            .next_refresh_in()
+            .map(|d| format!("retry in {}", short_duration(d.as_secs())))
+            .unwrap_or_default();
+        return vec![Span::styled(
+            format!("✗ refresh failed · {retry} "),
+            Color::Red,
+        )];
+    }
+    match app.last_ok {
+        Some(t) => vec![Span::styled(
+            format!("↻ {} ago{next} ", short_duration(t.elapsed().as_secs())),
+            DIM,
+        )],
+        None => vec![],
+    }
+}
+
+/// `45s`, `2m`, `1h`: coarse enough that it only changes when it should be read.
+pub fn short_duration(secs: u64) -> String {
+    match secs {
+        0..=99 => format!("{secs}s"),
+        100..=5999 => format!("{}m", secs / 60),
+        _ => format!("{}h", secs / 3600),
+    }
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
@@ -1339,5 +1433,116 @@ mod tests {
             let last = out.lines().last().unwrap();
             assert!(last.contains("esc cancel"), "{width}: {last}");
         }
+    }
+
+    fn footer(app: &mut App, width: u16) -> String {
+        let out = render(app, width, 12);
+        out.lines().last().unwrap().to_string()
+    }
+
+    fn fetched_app() -> App {
+        let mut app = app_with_items();
+        app.update(crate::app::Msg::Loading);
+        app.update(crate::app::Msg::List(Ok(Snapshot {
+            prs: vec![sample(1, "tool", Ci::Success)],
+            issues: vec![],
+            rate_remaining: Some(4000),
+        })));
+        app
+    }
+
+    #[test]
+    fn short_durations_are_coarse() {
+        assert_eq!(short_duration(0), "0s");
+        assert_eq!(short_duration(78), "78s");
+        assert_eq!(short_duration(99), "99s");
+        assert_eq!(short_duration(100), "1m");
+        assert_eq!(short_duration(150), "2m");
+        assert_eq!(short_duration(7200), "2h");
+    }
+
+    #[tokio::test]
+    async fn footer_shows_data_age_and_time_to_next_refresh() {
+        let mut app = fetched_app();
+        let line = footer(&mut app, 130);
+        assert!(line.contains("↻ 0s ago"), "{line}");
+        assert!(
+            line.contains("next in 89s") || line.contains("next in 90s"),
+            "{line}"
+        );
+        assert!(
+            line.trim_end().ends_with("next in 89s") || line.trim_end().ends_with("next in 90s")
+        );
+        assert!(line.contains("? help"), "hints stay: {line}");
+    }
+
+    #[tokio::test]
+    async fn footer_shows_progress_while_refreshing() {
+        let mut app = fetched_app();
+        app.update(crate::app::Msg::Loading);
+        app.update(crate::app::Msg::Progress(3, 12));
+        let line = footer(&mut app, 130);
+        assert!(line.contains("refreshing 3/12"), "{line}");
+        assert!(!line.contains("↻"));
+    }
+
+    #[tokio::test]
+    async fn footer_shows_failure_with_a_retry_countdown() {
+        let mut app = fetched_app();
+        app.update(crate::app::Msg::Loading);
+        app.update(crate::app::Msg::List(Err("HTTP 502".into())));
+        let line = footer(&mut app, 130);
+        assert!(line.contains("refresh failed · retry in"), "{line}");
+        let top = render(&mut app, 130, 12);
+        assert!(top
+            .lines()
+            .next()
+            .unwrap()
+            .contains("fetch failed: HTTP 502"));
+    }
+
+    #[tokio::test]
+    async fn demo_footer_says_there_is_no_refresh() {
+        let mut app = fetched_app();
+        app.demo = true;
+        let line = footer(&mut app, 130);
+        assert!(line.contains("demo data · no refresh"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn narrow_footers_drop_hints_before_the_refresh_timing() {
+        for width in [50u16, 60, 80] {
+            let mut app = fetched_app();
+            let line = footer(&mut app, width);
+            assert!(line.contains("↻"), "{width}: {line}");
+            assert!(line.contains("? help"), "{width}: {line}");
+            assert!(line.chars().count() <= width as usize);
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_timing_is_hidden_while_typing() {
+        let mut app = fetched_app();
+        app.mode = Mode::Filter;
+        app.filter = "abc".into();
+        let line = footer(&mut app, 130);
+        assert!(!line.contains("↻") && !line.contains("next in"), "{line}");
+    }
+
+    #[test]
+    fn hints_are_dropped_least_important_first() {
+        let pairs = [
+            ("↑↓", "move"),
+            ("enter", "open"),
+            ("o", "browser"),
+            ("/", "filter"),
+            ("?", "help"),
+        ];
+        let all = fit_hints(&pairs, 200);
+        assert_eq!(all, pairs.to_vec());
+        let some = fit_hints(&pairs, 25);
+        assert!(some.contains(&("?", "help")) && some.contains(&("enter", "open")));
+        assert!(!some.contains(&("o", "browser")));
+        assert!(fit_hints(&pairs, 3).is_empty());
     }
 }

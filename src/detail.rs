@@ -4,7 +4,7 @@ use crate::app::{ClaudeRun, RunState};
 use crate::diff;
 use crate::gh::{Ci, Detail, Item, Kind};
 use crate::markdown;
-use crate::ui::{age, badge, chip, ci_span, gone_color, DIM, RABBIT};
+use crate::ui::{age, badge, chip, ci_span, gone_color, short_duration, DIM, RABBIT};
 use chrono::{DateTime, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
@@ -171,14 +171,6 @@ fn stats_line(d: &Detail) -> Line<'static> {
 }
 
 const REPLY_LINES: usize = 14;
-
-fn short_duration(secs: u64) -> String {
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m", secs / 60),
-        _ => format!("{}h", secs / 3600),
-    }
-}
 
 /// The PR's Claude run: progress while it runs, Claude's reply and where to find the rest after.
 fn claude_section(run: &ClaudeRun, spinner: &str, width: usize) -> Vec<Line<'static>> {

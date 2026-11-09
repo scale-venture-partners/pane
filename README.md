@@ -15,6 +15,7 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - Open [CodeRabbit](https://coderabbit.ai) review threads are flagged: an orange `CR 3` chip on the row, a badge and a CodeRabbit section in the PR details (severity, title and file:line for each thread, click to open it), and a key that has Claude work through them.
 - Labels show as chips in GitHub's own colors, in rows (when there is room) and in details; `/` filtering matches label names.
 - `◆` marks items that changed since you last looked at them.
+- The bottom-right corner shows refresh state: `↻ 12s ago · next in 78s`, a spinner with `refreshing 3/12` while a refresh runs, and `✗ refresh failed · retry in 70s` when GitHub can't be reached. The header shows the error text and how many API calls you have left.
 - Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom.
 - Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears.
 - Basic actions without leaving the terminal: open in browser, copy URL, comment, approve, merge, close, toggle draft. Anything that writes asks `y/N` first.

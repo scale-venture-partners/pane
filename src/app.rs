@@ -103,6 +103,8 @@ pub struct App {
     pub fresh: HashSet<String>,
     seen: HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub last_ok: Option<Instant>,
+    /// When the most recent fetch began; the next scheduled one is `refresh_secs` later.
+    pub last_fetch_started: Option<Instant>,
     pub fetch_error: Option<String>,
     pub loading: bool,
     pub rate: Option<u64>,
@@ -169,6 +171,7 @@ impl App {
             fresh: HashSet::new(),
             seen: HashMap::new(),
             last_ok: None,
+            last_fetch_started: None,
             fetch_error: None,
             loading: true,
             rate: None,
@@ -299,6 +302,16 @@ impl App {
                 self.set_status(format!("claude could not run on {what}: {e}"), true);
             }
         }
+    }
+
+    /// Time until the next scheduled refresh; `None` when none is scheduled (demo mode, or the
+    /// first fetch has not started).
+    pub fn next_refresh_in(&self) -> Option<Duration> {
+        if self.demo {
+            return None;
+        }
+        let due = self.last_fetch_started? + Duration::from_secs(self.cfg.refresh_secs);
+        Some(due.saturating_duration_since(Instant::now()))
     }
 
     pub fn spinner(&self) -> &'static str {
@@ -519,6 +532,7 @@ impl App {
             }
             Msg::Loading => {
                 self.loading = true;
+                self.last_fetch_started = Some(Instant::now());
                 self.progress = None;
             }
             Msg::Progress(done, total) => self.progress = Some((done, total)),
@@ -1652,5 +1666,30 @@ mod tests {
         app.start_claude(Config::default().coderabbit_prompt);
         assert_eq!(app.runs["a2"].prompt, "repair", "a second run is refused");
         assert!(app.status.as_ref().is_some_and(|s| s.error));
+    }
+
+    #[tokio::test]
+    async fn next_refresh_counts_down_from_the_last_fetch_start() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
+        assert_eq!(
+            app.next_refresh_in(),
+            None,
+            "nothing scheduled before the first fetch"
+        );
+        app.update(Msg::Loading);
+        let next = app.next_refresh_in().unwrap();
+        assert!(
+            next <= Duration::from_secs(90) && next > Duration::from_secs(85),
+            "{next:?}"
+        );
+        app.last_fetch_started = Some(Instant::now() - Duration::from_secs(100));
+        assert_eq!(
+            app.next_refresh_in(),
+            Some(Duration::ZERO),
+            "overdue clamps to zero"
+        );
+        app.demo = true;
+        assert_eq!(app.next_refresh_in(), None);
     }
 }
