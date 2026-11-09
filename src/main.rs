@@ -16,6 +16,7 @@ use anyhow::Result;
 use app::{App, Msg};
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,7 +143,11 @@ async fn run(
     let mut dirty = true;
     loop {
         if dirty {
-            terminal.draw(|f| ui::draw(f, app))?;
+            // Terminals that support synchronized output show each frame whole; others ignore this.
+            execute!(stdout(), BeginSynchronizedUpdate)?;
+            let drawn = terminal.draw(|f| ui::draw(f, app));
+            execute!(stdout(), EndSynchronizedUpdate)?;
+            drawn?;
         }
         let Some(msg) = rx.recv().await else {
             return Ok(());

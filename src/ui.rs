@@ -1545,4 +1545,31 @@ mod tests {
         assert!(!some.contains(&("o", "browser")));
         assert!(fit_hints(&pairs, 3).is_empty());
     }
+
+    #[tokio::test]
+    async fn the_open_pane_does_not_flash_loading_or_lose_its_scroll_on_refresh() {
+        let diff = sample_diff(80);
+        let mut app = app_with_detail(&diff);
+        app.demo = true;
+        app.detail_scroll = 12;
+        let before = render(&mut app, 130, 30);
+        assert!(!before.contains("loading"));
+        let scroll_before = app.detail_scroll;
+        app.update(crate::app::Msg::Loading);
+        app.update(crate::app::Msg::List(Ok(Snapshot {
+            prs: vec![
+                sample(1, "tool", Ci::Success),
+                sample(2, "tool", Ci::Failure),
+                sample(3, "engine", Ci::Pending),
+            ],
+            issues: vec![],
+            rate_remaining: Some(4000),
+        })));
+        let during = render(&mut app, 130, 30);
+        assert!(
+            !during.contains("loading"),
+            "stale details stay visible: {during}"
+        );
+        assert_eq!(app.detail_scroll, scroll_before, "scroll position is kept");
+    }
 }

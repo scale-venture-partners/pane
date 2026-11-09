@@ -417,6 +417,24 @@ impl App {
         }
     }
 
+    /// Marks cached details and diffs out of date without removing them, so the pane keeps
+    /// showing the old content (and the scroll position) until the refetch lands.
+    fn mark_stale(&mut self, only: Option<&str>) {
+        let Some(old) = Instant::now().checked_sub(DETAIL_STALE + Duration::from_secs(1)) else {
+            return;
+        };
+        for (id, d) in self.details.iter_mut() {
+            if only.is_none_or(|o| o == id) {
+                d.fetched = old;
+            }
+        }
+        for (id, (t, _)) in self.diffs.iter_mut() {
+            if only.is_none_or(|o| o == id) {
+                *t = old;
+            }
+        }
+    }
+
     fn drop_ghost_unless(&mut self, keep: Option<&str>) {
         let Some(g) = &self.ghost else { return };
         if keep == Some(g.id.as_str()) {
@@ -548,6 +566,9 @@ impl App {
                         self.details.insert(id, d);
                     }
                     Err(e) => {
+                        if self.details.contains_key(&id) {
+                            self.set_status(format!("couldn't refresh details: {e}"), true);
+                        }
                         self.detail_err.insert(id, e);
                     }
                 }
@@ -560,13 +581,15 @@ impl App {
                         self.diffs.insert(id, (Instant::now(), d));
                     }
                     Err(e) => {
+                        if self.diffs.contains_key(&id) {
+                            self.set_status(format!("couldn't refresh the diff: {e}"), true);
+                        }
                         self.diff_err.insert(id, e);
                     }
                 }
             }
             Msg::ActionDone(Ok(out)) => {
-                self.details.clear();
-                self.diffs.clear();
+                self.mark_stale(None);
                 self.set_status(
                     if out.is_empty() {
                         "done".to_string()
@@ -615,8 +638,8 @@ impl App {
                 self.fetch_error = None;
                 self.ensure_selection();
                 if let Some(id) = &self.selected {
-                    self.details.remove(id);
-                    self.diffs.remove(id);
+                    let id = id.clone();
+                    self.mark_stale(Some(&id));
                 }
                 self.ensure_detail();
             }
@@ -644,7 +667,7 @@ impl App {
         }
         self.ghost = Some(item.clone());
         if first_time {
-            self.details.remove(&item.id);
+            self.mark_stale(Some(&item.id));
         }
     }
 
@@ -1691,5 +1714,115 @@ mod tests {
         );
         app.demo = true;
         assert_eq!(app.next_refresh_in(), None);
+    }
+
+    fn detail_for() -> Detail {
+        Detail {
+            state: "OPEN".into(),
+            created_at: String::new(),
+            body: "old body".into(),
+            head: String::new(),
+            base: String::new(),
+            mergeable: String::new(),
+            merge_state: String::new(),
+            additions: 0,
+            deletions: 0,
+            files: 0,
+            labels: vec![],
+            assignees: vec![],
+            requested: vec![],
+            reviews: vec![],
+            checks: vec![],
+            comments: vec![],
+            rabbit_threads: vec![],
+            fetched: Instant::now(),
+        }
+    }
+
+    /// An app with details and a diff cached for the selected PR, in demo mode so that refetches
+    /// never reach the network.
+    fn app_with_cached_detail() -> App {
+        let mut app = loaded_app();
+        app.demo = true;
+        press(&mut app, KeyCode::Enter);
+        let id = app.selected.clone().unwrap();
+        app.details.insert(id.clone(), detail_for());
+        app.diffs
+            .insert(id, (Instant::now(), "diff --git a/x b/x\n".into()));
+        app
+    }
+
+    fn is_stale(app: &App, id: &str) -> bool {
+        app.details[id].fetched.elapsed() > DETAIL_STALE && app.diffs[id].0.elapsed() > DETAIL_STALE
+    }
+
+    #[tokio::test]
+    async fn a_refresh_keeps_showing_the_open_details_but_marks_them_stale() {
+        let mut app = app_with_cached_detail();
+        let id = app.selected.clone().unwrap();
+        assert!(!is_stale(&app, &id));
+        let snap = Snapshot {
+            prs: vec![item("a", 1, 1), item("a", 2, 2), item("b", 3, 3)],
+            issues: vec![],
+            rate_remaining: None,
+        };
+        app.update(Msg::List(Ok(snap)));
+        assert!(app.details.contains_key(&id), "details stay on screen");
+        assert!(app.diffs.contains_key(&id), "the diff stays on screen");
+        assert!(is_stale(&app, &id), "but will be refetched");
+    }
+
+    #[tokio::test]
+    async fn only_the_selected_pr_is_marked_stale_by_a_refresh() {
+        let mut app = app_with_cached_detail();
+        let other = "a1".to_string();
+        app.details.insert(other.clone(), detail_for());
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![item("a", 1, 1), item("a", 2, 2), item("b", 3, 3)],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        assert!(app.details[&other].fetched.elapsed() <= DETAIL_STALE);
+    }
+
+    #[tokio::test]
+    async fn actions_mark_everything_stale_instead_of_clearing_it() {
+        let mut app = app_with_cached_detail();
+        let id = app.selected.clone().unwrap();
+        app.update(Msg::ActionDone(Ok("done".into())));
+        assert!(app.details.contains_key(&id) && app.diffs.contains_key(&id));
+        assert!(is_stale(&app, &id));
+    }
+
+    #[tokio::test]
+    async fn failed_refetches_keep_old_content_and_say_so() {
+        let mut app = app_with_cached_detail();
+        let id = app.selected.clone().unwrap();
+        app.update(Msg::Detail(id.clone(), Err("HTTP 502".into())));
+        assert!(app.details.contains_key(&id));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|s| s.error && s.text.contains("couldn't refresh details")));
+        app.status = None;
+        app.update(Msg::Diff(id.clone(), Err("HTTP 502".into())));
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|s| s.error && s.text.contains("couldn't refresh the diff")));
+        assert!(app.diffs.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn a_successful_refetch_replaces_the_old_content_and_clears_the_error() {
+        let mut app = app_with_cached_detail();
+        let id = app.selected.clone().unwrap();
+        app.detail_err.insert(id.clone(), "old error".into());
+        let mut fresh = detail_for();
+        fresh.body = "new body".into();
+        app.update(Msg::Detail(id.clone(), Ok(fresh)));
+        assert_eq!(app.details[&id].body, "new body");
+        assert!(!app.detail_err.contains_key(&id));
+        assert!(!is_stale(&app, &id) || app.details[&id].fetched.elapsed() <= DETAIL_STALE);
     }
 }
