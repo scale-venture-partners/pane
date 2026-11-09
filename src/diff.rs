@@ -217,11 +217,7 @@ fn pad_to(mut spans: Vec<Span<'static>>, width: usize, bg: Option<Color>) -> Lin
 fn mini_bar(adds: usize, dels: usize) -> Vec<Span<'static>> {
     let total = adds + dels;
     let cells = 5usize;
-    let green = if total == 0 {
-        0
-    } else {
-        (adds * cells + total / 2) / total
-    };
+    let green = (adds * cells + total / 2).checked_div(total).unwrap_or(0);
     let red = if total == 0 { 0 } else { cells - green };
     vec![
         Span::styled("■".repeat(green), Color::Green),
