@@ -12,5 +12,5 @@ Please report vulnerabilities privately through GitHub's "Report a vulnerability
 
 ## Scope notes
 
-- The repair action (`r`) runs `claude -p` with `--permission-mode auto` by default, on pull requests whose text and code may be written by someone else. Prompt injection through that content is a known risk of the feature; see "Security and privacy" in the README. Reports of ways to make pane itself pass untrusted content as instructions, or escape its worktree isolation, are in scope.
+- The repair action (`r`) runs `claude -p` with `--permission-mode auto` by default, on pull requests whose text and code may be written by someone else. CodeRabbit comments, which the `t` action feeds to Claude, count as that content too. Prompt injection through that content is a known risk of the feature; see "Security and privacy" in the README. Reports of ways to make pane itself pass untrusted content as instructions, or escape its worktree isolation, are in scope.
 - Links from GitHub data are opened only when they are `http://` or `https://`.

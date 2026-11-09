@@ -4,11 +4,14 @@ use chrono::{DateTime, Utc};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::Instant;
 use tokio::process::Command;
 
 const MAX_PAGES: usize = 5;
-const SCOPE_BUDGET: usize = 190;
+const SCOPE_BUDGET: usize = 160;
+const RABBIT_QUALIFIER: &str = "reviewed-by:app/coderabbitai";
+const RABBIT_BATCH: usize = 50;
 const MAX_DIFF_LINES: usize = 3000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,78 @@ fn parse_labels(v: &Value, path: &str) -> Vec<Label> {
             rgb: parse_hex(&text(l, "/color")),
         })
         .collect()
+}
+
+/// Review threads CodeRabbit opened on a PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rabbit {
+    pub unresolved: usize,
+    pub total: usize,
+    /// More threads exist than were fetched, so the counts are lower bounds.
+    pub capped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RabbitThread {
+    pub path: String,
+    pub line: Option<u64>,
+    pub resolved: bool,
+    pub outdated: bool,
+    pub severity: String,
+    pub title: String,
+    pub url: String,
+}
+
+pub fn is_coderabbit(login: &str) -> bool {
+    login.to_ascii_lowercase().starts_with("coderabbitai")
+}
+
+fn strip_markup(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if in_tag => {}
+            _ => out.push(c),
+        }
+    }
+    out.replace("**", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Severity and a one-line title from a CodeRabbit review comment. Comments open with a header
+/// like `Major · Stability & Availability · Heavy lift`, often followed by a bold title line.
+pub fn summarize_comment(body: &str) -> (String, String) {
+    let mut lines = body
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("<!--"));
+    let header = strip_markup(lines.next().unwrap_or(""));
+    let mut parts = header.split(" · ");
+    let severity = parts.next().unwrap_or("").trim().to_string();
+    let category = parts.next().unwrap_or("").trim().to_string();
+    // The title is the first plain line outside any collapsed <details> block, which holds
+    // CodeRabbit's analysis and script output.
+    let mut depth = 0usize;
+    let mut title = None;
+    for line in lines {
+        let t = line.trim_start();
+        let opens = t.matches("<details").count();
+        let closes = t.matches("</details>").count();
+        depth = (depth + opens).saturating_sub(closes);
+        if opens > 0 || closes > 0 || depth > 0 || t.starts_with('<') || t.starts_with("---") {
+            continue;
+        }
+        let clean = strip_markup(t);
+        if !clean.is_empty() {
+            title = Some(clean);
+            break;
+        }
+    }
+    (severity, title.unwrap_or(category))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +162,8 @@ pub struct Item {
     /// PR head and base branch names; empty for issues.
     pub head: String,
     pub base: String,
+    /// Set for PRs CodeRabbit has reviewed.
+    pub rabbit: Option<Rabbit>,
 }
 
 #[derive(Debug, Default)]
@@ -128,6 +205,7 @@ pub struct Detail {
     pub reviews: Vec<(String, String)>,
     pub checks: Vec<Check>,
     pub comments: Vec<Comment>,
+    pub rabbit_threads: Vec<RabbitThread>,
     pub fetched: Instant,
 }
 
@@ -320,16 +398,17 @@ impl Node {
             labels,
             head: self.head_ref_name.unwrap_or_default(),
             base: self.base_ref_name.unwrap_or_default(),
+            rabbit: None,
         }
     }
 }
 
-async fn search(scope: &str, kind: Kind) -> Result<(Vec<Item>, u64)> {
+async fn search(scope: &str, kind: Kind, extra: &str) -> Result<(Vec<Item>, u64)> {
     if kind == Kind::Issue && scope.starts_with("review-requested:") {
         return Ok((vec![], u64::MAX));
     }
     let word = if kind == Kind::Pr { "pr" } else { "issue" };
-    let q = format!("{scope} is:{word} is:open archived:false sort:updated-desc");
+    let q = format!("{scope} is:{word} is:open archived:false {extra} sort:updated-desc");
     let mut items = Vec::new();
     let mut after = String::new();
     let mut remaining = u64::MAX;
@@ -360,6 +439,71 @@ async fn search(scope: &str, kind: Kind) -> Result<(Vec<Item>, u64)> {
 }
 
 /// `on_progress(done, total)` is called as each search query finishes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Prs,
+    Issues,
+    /// PRs CodeRabbit has reviewed; only their ids are used.
+    Rabbit,
+}
+
+const RABBIT_THREADS: &str = r#"
+query($ids:[ID!]!){ nodes(ids:$ids){ ... on PullRequest{
+  id
+  reviewThreads(first:100){ totalCount nodes{
+    isResolved
+    comments(first:1){nodes{author{login}}}
+  }}
+}}}"#;
+
+/// A PR id and its CodeRabbit thread counts from one `nodes(ids:)` result entry.
+fn rabbit_from_node(n: &Value) -> Option<(String, Rabbit)> {
+    let id = text(n, "/id");
+    if id.is_empty() {
+        return None;
+    }
+    let threads = nodes(n, "/reviewThreads/nodes");
+    let mine: Vec<&Value> = threads
+        .iter()
+        .filter(|t| is_coderabbit(&text(t, "/comments/nodes/0/author/login")))
+        .collect();
+    let unresolved = mine
+        .iter()
+        .filter(|t| t.pointer("/isResolved").and_then(Value::as_bool) != Some(true))
+        .count();
+    Some((
+        id,
+        Rabbit {
+            unresolved,
+            total: mine.len(),
+            capped: num(n, "/reviewThreads/totalCount") > threads.len() as u64,
+        },
+    ))
+}
+
+/// CodeRabbit thread counts for the given PR ids.
+async fn rabbit_counts(ids: &[String]) -> Result<HashMap<String, Rabbit>> {
+    let mut out = HashMap::new();
+    for chunk in ids.chunks(RABBIT_BATCH) {
+        let mut cmd_vars: Vec<(String, String)> = vec![];
+        for id in chunk {
+            cmd_vars.push(("ids[]".to_string(), id.clone()));
+        }
+        let vars: Vec<(&str, &str)> = cmd_vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let v = graphql(RABBIT_THREADS, &vars).await?;
+        for n in nodes(&v, "/data/nodes") {
+            if let Some((id, rabbit)) = rabbit_from_node(n) {
+                out.insert(id, rabbit);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `on_progress(done, total)` is called as each search query finishes.
 pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Result<Snapshot> {
     let login = if cfg.orgs.is_empty() && cfg.repos.is_empty() {
         Some(viewer().await?)
@@ -368,9 +512,15 @@ pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Resu
     };
     let scopes = scopes(cfg, login.as_deref());
     let jobs = scopes.iter().flat_map(|s| {
-        [Kind::Pr, Kind::Issue]
-            .into_iter()
-            .map(move |k| async move { search(s, k).await.map(|r| (k, r)) })
+        [
+            (Pass::Prs, Kind::Pr, ""),
+            (Pass::Issues, Kind::Issue, ""),
+            (Pass::Rabbit, Kind::Pr, RABBIT_QUALIFIER),
+        ]
+        .into_iter()
+        .map(move |(pass, kind, extra)| async move {
+            search(s, kind, extra).await.map(|r| (pass, r))
+        })
     });
     let mut pending: FuturesUnordered<_> = jobs.collect();
     let total = pending.len();
@@ -381,17 +531,26 @@ pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Resu
         on_progress(results.len(), total);
     }
     let mut snap = Snapshot::default();
+    let mut rabbit_ids: Vec<String> = vec![];
     let mut rate = u64::MAX;
-    for (kind, (items, remaining)) in results {
+    for (pass, (items, remaining)) in results {
         rate = rate.min(remaining);
-        match kind {
-            Kind::Pr => snap.prs.extend(items),
-            Kind::Issue => snap.issues.extend(items),
+        match pass {
+            Pass::Prs => snap.prs.extend(items),
+            Pass::Issues => snap.issues.extend(items),
+            Pass::Rabbit => rabbit_ids.extend(items.into_iter().map(|i| i.id)),
         }
     }
     for v in [&mut snap.prs, &mut snap.issues] {
         v.sort_by(|a, b| a.url.cmp(&b.url));
         v.dedup_by(|a, b| a.url == b.url);
+    }
+    rabbit_ids.sort();
+    rabbit_ids.dedup();
+    rabbit_ids.retain(|id| snap.prs.iter().any(|p| &p.id == id));
+    let counts = rabbit_counts(&rabbit_ids).await?;
+    for pr in &mut snap.prs {
+        pr.rabbit = counts.get(&pr.id).copied();
     }
     snap.rate_remaining = (rate != u64::MAX).then_some(rate);
     Ok(snap)
@@ -405,6 +564,10 @@ query($id:ID!){ node(id:$id){ ... on PullRequest{
   reviewRequests(first:10){nodes{requestedReviewer{... on User{login} ... on Team{name}}}}
   latestReviews(first:10){nodes{author{login} state}}
   comments(last:5){nodes{author{login} body createdAt}}
+  reviewThreads(first:100){nodes{
+    isResolved isOutdated path line
+    comments(first:1){nodes{url body author{login}}}
+  }}
   commits(last:1){nodes{commit{statusCheckRollup{contexts(first:60){nodes{
     __typename
     ... on CheckRun{name status conclusion detailsUrl}
@@ -436,6 +599,25 @@ fn nodes<'a>(v: &'a Value, p: &str) -> &'a [Value] {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[])
+}
+
+fn rabbit_threads(n: &Value) -> Vec<RabbitThread> {
+    nodes(n, "/reviewThreads/nodes")
+        .iter()
+        .filter(|t| is_coderabbit(&text(t, "/comments/nodes/0/author/login")))
+        .map(|t| {
+            let (severity, title) = summarize_comment(&text(t, "/comments/nodes/0/body"));
+            RabbitThread {
+                path: text(t, "/path"),
+                line: t.pointer("/line").and_then(Value::as_u64),
+                resolved: t.pointer("/isResolved").and_then(Value::as_bool) == Some(true),
+                outdated: t.pointer("/isOutdated").and_then(Value::as_bool) == Some(true),
+                severity,
+                title,
+                url: text(t, "/comments/nodes/0/url"),
+            }
+        })
+        .collect()
 }
 
 pub fn check_from_run(status: &str, conclusion: &str) -> Ci {
@@ -512,6 +694,7 @@ pub async fn fetch_detail(item: &Item) -> Result<Detail> {
             .map(|r| (text(r, "/author/login"), text(r, "/state")))
             .collect(),
         checks,
+        rabbit_threads: rabbit_threads(n),
         comments: nodes(n, "/comments/nodes")
             .iter()
             .map(|c| Comment {
@@ -618,6 +801,120 @@ mod tests {
             let q = format!("{scope} is:issue is:open archived:false sort:updated-desc");
             assert!(q.len() <= 256, "{} chars: {q}", q.len());
         }
+    }
+
+    #[test]
+    fn rabbit_query_fits_the_search_length_limit() {
+        for scope in scopes(&many_repos(), None) {
+            let q = format!(
+                "{scope} is:pr is:open archived:false {RABBIT_QUALIFIER} sort:updated-desc"
+            );
+            assert!(q.len() <= 256, "{} chars: {q}", q.len());
+        }
+    }
+
+    #[test]
+    fn coderabbit_logins_match_bot_forms_only() {
+        assert!(is_coderabbit("coderabbitai"));
+        assert!(is_coderabbit("coderabbitai[bot]"));
+        assert!(is_coderabbit("CodeRabbitAI"));
+        assert!(!is_coderabbit("octocat"));
+        assert!(!is_coderabbit(""));
+    }
+
+    #[test]
+    fn comment_summary_reads_header_and_bold_title() {
+        let body = "<!-- coderabbit-ai-generated:v1 -->\n\n**<picture><img src=\"x.svg\" alt=\"\"></picture> Minor** · **Functional Correctness** · **Quick win**\n\n**Add a visible fallback link.**\n\n`window.open` runs late.";
+        assert_eq!(
+            summarize_comment(body),
+            (
+                "Minor".to_string(),
+                "Add a visible fallback link.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn comment_summary_skips_collapsed_analysis_blocks() {
+        let body = "<!-- coderabbit-ai-generated:v1 -->\n\n**<picture><img src=\"x.svg\"></picture> Minor** · **Security & Privacy** · **Quick win**\n\n<details>\n<summary>🧩 Analysis chain</summary>\n\nScript executed:\n\n```bash\nrg foo\n```\n\n---\n\n</details>\n\n**Validate the redirect target.**\n\nOpen redirects are risky.";
+        assert_eq!(
+            summarize_comment(body),
+            (
+                "Minor".to_string(),
+                "Validate the redirect target.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn comment_summary_handles_nested_details() {
+        let body = "**Major** · **Cat** · **x**\n<details>\n<details>\ninner\n</details>\nstill inside\n</details>\nReal title";
+        assert_eq!(
+            summarize_comment(body),
+            ("Major".to_string(), "Real title".to_string())
+        );
+    }
+
+    #[test]
+    fn comment_summary_falls_back_to_the_category() {
+        let body = "<!-- coderabbit-ai-generated:v1 -->\n\n**<picture><img src=\"x.svg\"></picture> Major** · **Stability & Availability** · **Heavy lift**\n\n<details>\n<summary>Review details</summary>\n</details>";
+        assert_eq!(
+            summarize_comment(body),
+            ("Major".to_string(), "Stability & Availability".to_string())
+        );
+        assert_eq!(summarize_comment(""), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn rabbit_counts_only_coderabbit_threads() {
+        let n = serde_json::json!({
+            "id": "PR_1",
+            "reviewThreads": { "totalCount": 4, "nodes": [
+                {"isResolved": false, "comments": {"nodes": [{"author": {"login": "coderabbitai"}}]}},
+                {"isResolved": true,  "comments": {"nodes": [{"author": {"login": "coderabbitai"}}]}},
+                {"isResolved": false, "comments": {"nodes": [{"author": {"login": "human"}}]}},
+                {"isResolved": false, "comments": {"nodes": [{"author": {"login": "coderabbitai"}}]}}
+            ]}
+        });
+        let (id, r) = rabbit_from_node(&n).unwrap();
+        assert_eq!(id, "PR_1");
+        assert_eq!((r.unresolved, r.total, r.capped), (2, 3, false));
+        assert!(rabbit_from_node(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn rabbit_counts_flag_truncated_thread_lists() {
+        let n = serde_json::json!({
+            "id": "PR_2",
+            "reviewThreads": { "totalCount": 150, "nodes": [
+                {"isResolved": false, "comments": {"nodes": [{"author": {"login": "coderabbitai"}}]}}
+            ]}
+        });
+        assert!(rabbit_from_node(&n).unwrap().1.capped);
+    }
+
+    #[test]
+    fn detail_threads_keep_location_state_and_url() {
+        let n = serde_json::json!({
+            "reviewThreads": { "nodes": [
+                {"isResolved": false, "isOutdated": true, "path": "a.rs", "line": 12,
+                 "comments": {"nodes": [{"url": "https://x/1", "author": {"login": "coderabbitai"},
+                   "body": "**<img alt=\"\"> Major** · **Security**\n\n**Sanitize the path.**"}]}},
+                {"isResolved": false, "path": "b.rs", "line": null,
+                 "comments": {"nodes": [{"url": "https://x/2", "author": {"login": "human"}, "body": "hi"}]}}
+            ]}
+        });
+        let threads = rabbit_threads(&n);
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!(
+            (t.path.as_str(), t.line, t.outdated, t.resolved),
+            ("a.rs", Some(12), true, false)
+        );
+        assert_eq!(
+            (t.severity.as_str(), t.title.as_str(), t.url.as_str()),
+            ("Major", "Sanitize the path.", "https://x/1")
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - PR details are laid out as a card: state, review, CI and merge badges, branch chips, a `+/−` size bar, a check progress bar, rendered Markdown descriptions and comments (headings, lists, tasks, code blocks, links), and a diff with a file summary, line-number gutters and tinted added/removed rows.
 - Per PR at a glance: CI state `●`, review state `✓ ✗ ○`, draft `◇`.
 - Stacked PRs are nested: a PR that targets another open PR's branch is shown under that PR with tree connectors (`├─` `└─`), so a stack reads top to bottom. PRs that target anything else, such as `main`, stay at the top level.
+- Open [CodeRabbit](https://coderabbit.ai) review threads are flagged: an orange `CR 3` chip on the row, a badge and a CodeRabbit section in the PR details (severity, title and file:line for each thread, click to open it), and a key that has Claude work through them.
 - Labels show as chips in GitHub's own colors, in rows (when there is room) and in details; `/` filtering matches label names.
 - `◆` marks items that changed since you last looked at them.
 - Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom.
@@ -29,6 +30,10 @@ Descriptions and comments render as Markdown:
 A diff with a file summary, line numbers and tinted rows:
 
 ![Diff view](docs/screenshots/diff.png)
+
+CodeRabbit threads and the prompt for Claude:
+
+![CodeRabbit section and prompt](docs/screenshots/coderabbit.png)
 
 Issues get the same treatment, labels included:
 
@@ -73,6 +78,7 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | `a` `m` `x` `w` | approve, merge, close, toggle draft (each confirms) |
 | `c` | comment |
 | `r` | repair: run Claude on the PR (edit the prompt, Enter to run) |
+| `t` | have Claude work through the PR's open CodeRabbit threads |
 | `q` | quit |
 
 ## Configuration
@@ -86,6 +92,7 @@ Optional file at `~/.config/pane/config.toml` (or `$XDG_CONFIG_HOME/pane/config.
 | `orgs` | `[]` | show every open item in these orgs |
 | `repos` | `[]` | extra `owner/name` repos to show |
 | `claude_prompt` | `"Rebase this PR on its base branch and fix any failing checks."` | default prompt for the Claude action |
+| `coderabbit_prompt` | read, fix or answer, and resolve the threads | prompt for the CodeRabbit action |
 | `claude_args` | `["--permission-mode", "auto"]` | extra arguments for `claude` |
 | `claude_worktree` | `true` | run Claude in its own git worktree |
 | `repo_roots` | `~/code`, `~/src`, `~/dev`, `~/projects`, `~/GitHub`, `~/Documents/GitHub` | where to look for local clones |
@@ -103,7 +110,9 @@ When both `orgs` and `repos` are empty, pane shows items that involve you.
 
 ## Repairing a PR with Claude
 
-Press `r` (repair) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background and opens the PR's details, where a **Claude** section at the top shows progress while it runs and Claude's reply, the log path and any leftover worktree afterwards. The PR row shows a spinner while it works, and the status bar shows the first line of the reply when it finishes.
+Two keys start a Claude run on the selected PR: `r` (repair: rebase and fix failing checks) and `t` (work through its open CodeRabbit threads). They differ only in the prompt they start from, and they share the same one-run-per-PR slot described below.
+
+Press `r` (or `t`) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background and opens the PR's details, where a **Claude** section at the top shows progress while it runs and Claude's reply, the log path and any leftover worktree afterwards. The PR row shows a spinner while it works, and the status bar shows the first line of the reply when it finishes.
 
 Each PR has at most one run at a time; starting another after one finishes replaces its result.
 
@@ -137,9 +146,13 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 | link does not open | pane needs `open` (macOS) or `xdg-open` (Linux) on `PATH` |
 | label colors look off | set `COLORTERM=truecolor` if your terminal supports it |
 
+## CodeRabbit
+
+For PRs [CodeRabbit](https://coderabbit.ai) has reviewed (found with a `reviewed-by:app/coderabbitai` search), pane counts its unresolved review threads on every refresh. `t` is available when there are open ones. The default prompt tells Claude to list the threads with `gh api graphql`, follow each comment's "Prompt for AI Agents" section, fix the valid ones or reply with why not, resolve the threads it handled with the `resolveReviewThread` mutation, run the project's checks and push. Edit it in the prompt box, or set `coderabbit_prompt`. Whether Claude may resolve threads is up to your permission rules (`auto` mode decides); if it is blocked, the Claude section says so.
+
 ## Rate limits
 
-Each refresh issues a few GraphQL search queries (one per org, one per ~4 repos, twice for PRs and issues). At the default interval that is well under GitHub's hourly allowance; the header shows how many calls remain.
+Each refresh issues a few GraphQL search queries (per org, and per ~3 repos, for PRs, issues and CodeRabbit-reviewed PRs), plus one small query per 50 CodeRabbit-reviewed PRs. At the default interval that is well under GitHub's hourly allowance; the header shows how many calls remain.
 
 ## Development
 

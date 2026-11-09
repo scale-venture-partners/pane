@@ -222,7 +222,21 @@ impl App {
             .is_some_and(|r| matches!(r.state, RunState::Running))
     }
 
+    /// Opens the prompt editor prefilled with `prompt`; Enter then runs it on the selected PR.
+    fn edit_claude_prompt(&mut self, prompt: String) {
+        if self.ghost_selected() {
+            self.set_status("no longer open: nothing to do", true);
+        } else if self.selected.is_some() {
+            self.input = prompt;
+            self.mode = Mode::Claude;
+        }
+    }
+
     fn start_claude(&mut self, task: String) {
+        if self.demo {
+            self.set_status("demo mode: Claude is disabled", true);
+            return;
+        }
         let Some(item) = self.selected_item() else {
             return;
         };
@@ -877,14 +891,16 @@ impl App {
                     self.mode = Mode::Comment;
                 }
             }
-            KeyCode::Char('r') if is_pr => {
-                if self.demo {
-                    self.set_status("demo mode: Claude is disabled", true);
-                } else if self.ghost_selected() {
-                    self.set_status("no longer open: nothing to do", true);
-                } else if self.selected.is_some() {
-                    self.input = self.cfg.claude_prompt.clone();
-                    self.mode = Mode::Claude;
+            KeyCode::Char('r') if is_pr => self.edit_claude_prompt(self.cfg.claude_prompt.clone()),
+            KeyCode::Char('t') if is_pr => {
+                let open = self
+                    .selected_item()
+                    .and_then(|i| i.rabbit)
+                    .is_some_and(|r| r.unresolved > 0);
+                if open {
+                    self.edit_claude_prompt(self.cfg.coderabbit_prompt.clone());
+                } else {
+                    self.set_status("no unresolved CodeRabbit comments on this PR", true);
                 }
             }
             KeyCode::Char('x') => self.confirm(Op::Close),
@@ -1013,6 +1029,7 @@ mod tests {
             labels: vec![],
             head: String::new(),
             base: String::new(),
+            rabbit: None,
         }
     }
 
@@ -1286,8 +1303,14 @@ mod tests {
         let mut app = loaded_app();
         app.demo = true;
         press(&mut app, KeyCode::Char('r'));
+        assert!(
+            matches!(app.mode, Mode::Claude),
+            "demo mode still shows the prompt editor"
+        );
+        press(&mut app, KeyCode::Enter);
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.status.as_ref().is_some_and(|s| s.error));
+        assert!(app.runs.is_empty());
 
         let mut app = loaded_app();
         app.update(Msg::List(Ok(Snapshot {
@@ -1550,5 +1573,84 @@ mod tests {
         app.mine = true;
         app.viewer = Some("nobody".into());
         assert!(app.visible_rows().is_empty());
+    }
+
+    fn rabbit_app(unresolved: usize) -> App {
+        let mut app = loaded_app();
+        for pr in app.prs.iter_mut() {
+            pr.rabbit = Some(crate::gh::Rabbit {
+                unresolved,
+                total: unresolved.max(1),
+                capped: false,
+            });
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn t_opens_the_coderabbit_prompt_when_threads_are_open() {
+        let mut app = rabbit_app(2);
+        press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(app.mode, Mode::Claude));
+        assert_eq!(app.input, Config::default().coderabbit_prompt);
+        assert!(app.input.contains("CodeRabbit"));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('R'));
+        assert_eq!(
+            app.input,
+            Config::default().claude_prompt,
+            "r keeps its own prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn t_explains_when_there_is_nothing_to_resolve() {
+        for mut app in [rabbit_app(0), loaded_app()] {
+            press(&mut app, KeyCode::Char('t'));
+            assert!(matches!(app.mode, Mode::Normal));
+            assert!(app
+                .status
+                .as_ref()
+                .is_some_and(|s| s.error && s.text.contains("CodeRabbit")));
+        }
+    }
+
+    #[tokio::test]
+    async fn t_is_pr_only_and_ignores_merged_items() {
+        let mut app = rabbit_app(1);
+        press(&mut app, KeyCode::Char('2'));
+        press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        let mut app = rabbit_app(1);
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![item("a", 1, 1), item("a", 2, 2)],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        assert!(app.ghost_selected());
+        press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[tokio::test]
+    async fn coderabbit_runs_share_the_one_run_per_pr_slot() {
+        let (mut app, _rx) = no_checkout_app();
+        app.prs[0].rabbit = Some(crate::gh::Rabbit {
+            unresolved: 1,
+            total: 1,
+            capped: false,
+        });
+        app.prs[1].rabbit = app.prs[0].rabbit;
+        app.start_claude("repair".into());
+        assert!(app.is_busy("a2"));
+        press(&mut app, KeyCode::Char('t'));
+        assert!(
+            matches!(app.mode, Mode::Claude),
+            "the editor can open while busy"
+        );
+        app.start_claude(Config::default().coderabbit_prompt);
+        assert_eq!(app.runs["a2"].prompt, "repair", "a second run is refused");
+        assert!(app.status.as_ref().is_some_and(|s| s.error));
     }
 }

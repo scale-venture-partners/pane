@@ -17,6 +17,9 @@ repos = ["octocat/hello-world"]
 # The Claude action (press r on a PR). The prompt can be edited before each run.
 claude_prompt = "Rebase this PR on its base branch and fix any failing checks."
 
+# Prompt for the CodeRabbit action (press t on a PR with open CodeRabbit threads).
+# coderabbit_prompt = "..."
+
 # Extra arguments passed to `claude`. `claude -p` cannot ask for approval, so the default
 # uses auto mode, which approves routine actions on its own. Use [] to rely only on your
 # own Claude settings, or "acceptEdits" to allow file edits only.

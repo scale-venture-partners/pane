@@ -4,7 +4,7 @@ use crate::app::{ClaudeRun, RunState};
 use crate::diff;
 use crate::gh::{Ci, Detail, Item, Kind};
 use crate::markdown;
-use crate::ui::{age, badge, chip, ci_span, gone_color, DIM};
+use crate::ui::{age, badge, chip, ci_span, gone_color, DIM, RABBIT};
 use chrono::{DateTime, Utc};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
@@ -107,6 +107,9 @@ fn badges(item: &Item, d: &Detail) -> Line<'static> {
                 _ => Color::Yellow,
             };
             b.push(badge(r.replace('_', " "), c));
+        }
+        if let Some(r) = item.rabbit.filter(|r| r.unresolved > 0) {
+            b.push(badge(format!("CodeRabbit {} open", r.unresolved), RABBIT));
         }
         if item.gone.is_none() {
             let (pass, fail, pending) = check_counts(d);
@@ -236,6 +239,87 @@ fn claude_section(run: &ClaudeRun, spinner: &str, width: usize) -> Vec<Line<'sta
     lines
 }
 
+fn severity_color(severity: &str) -> Color {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" => Color::Red,
+        "major" => Color::Indexed(203),
+        "minor" => Color::Yellow,
+        _ => DIM,
+    }
+}
+
+const RESOLVED_SHOWN: usize = 3;
+
+/// CodeRabbit's review threads: unresolved first, each clickable to its comment on GitHub.
+fn rabbit_section(
+    d: &Detail,
+    width: usize,
+    t: &mut Vec<Line<'static>>,
+    clickable: &mut Vec<(usize, String)>,
+) {
+    let open = d.rabbit_threads.iter().filter(|x| !x.resolved).count();
+    let status = if open > 0 {
+        Span::styled(format!("{open} open"), RABBIT)
+    } else {
+        Span::styled("all resolved", Color::Green)
+    };
+    t.push(section(
+        "CodeRabbit",
+        vec![
+            status,
+            Span::styled(format!(" of {}", d.rabbit_threads.len()), DIM),
+        ],
+        width,
+    ));
+    if open > 0 {
+        t.push(Line::styled(
+            "press t to have Claude work through them",
+            DIM,
+        ));
+    }
+    let (unresolved, resolved): (Vec<_>, Vec<_>) =
+        d.rabbit_threads.iter().partition(|x| !x.resolved);
+    let hidden = resolved.len().saturating_sub(RESOLVED_SHOWN);
+    for th in unresolved
+        .into_iter()
+        .chain(resolved.into_iter().take(RESOLVED_SHOWN))
+    {
+        let (glyph, glyph_color) = if th.resolved {
+            ("✓", Color::Green)
+        } else {
+            ("○", RABBIT)
+        };
+        let where_ = match th.line {
+            Some(l) => format!("{}:{l}", th.path),
+            None => th.path.clone(),
+        };
+        let mut spans = vec![
+            Span::styled(format!("{glyph} "), glyph_color),
+            Span::styled(
+                format!("{} ", th.severity),
+                Style::new().fg(severity_color(&th.severity)).bold(),
+            ),
+        ];
+        let title_style = if th.resolved {
+            Style::new().fg(DIM)
+        } else {
+            Style::new()
+        };
+        spans.push(Span::styled(th.title.clone(), title_style));
+        spans.push(Span::styled(format!("  {where_}"), DIM));
+        if th.outdated {
+            spans.push(Span::styled(" (outdated)", DIM));
+        }
+        if !th.url.is_empty() {
+            clickable.push((t.len(), th.url.clone()));
+        }
+        t.push(Line::from(spans));
+    }
+    if hidden > 0 {
+        t.push(Line::styled(format!("+{hidden} more resolved"), DIM));
+    }
+}
+
 pub fn build(
     item: &Item,
     d: &Detail,
@@ -312,6 +396,11 @@ pub fn build(
                     Span::styled("awaiting review", DIM),
                 ]));
             }
+        }
+
+        if !d.rabbit_threads.is_empty() {
+            t.push(Line::raw(""));
+            rabbit_section(d, width, &mut t, &mut check_lines);
         }
 
         let (pass, fail, pending) = check_counts(d);

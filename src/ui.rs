@@ -12,6 +12,8 @@ pub(crate) const DIM: Color = Color::Indexed(245);
 const SEL_BG: Color = Color::Indexed(238);
 const WIDE_MIN: u16 = 110;
 const LABEL_MAX: usize = 16;
+/// CodeRabbit's orange.
+pub(crate) const RABBIT: Color = Color::Indexed(208);
 
 pub fn age(item_time: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
     let secs = (now - item_time).num_seconds().max(0);
@@ -157,12 +159,18 @@ fn item_line(
     } else {
         format!("  {:>4}", age(i.updated_at, Utc::now()))
     };
+    let rabbit = i
+        .rabbit
+        .filter(|r| r.unresolved > 0)
+        .map(|r| format!(" CR {}{} ", r.unresolved, if r.capped { "+" } else { "" }));
+    let rabbit_w = rabbit.as_ref().map_or(0, |t| t.chars().count() + 1);
     let used: usize = spans
         .iter()
         .map(|s| s.content.chars().count())
         .sum::<usize>()
         + num.chars().count()
-        + right.chars().count();
+        + right.chars().count()
+        + rabbit_w;
     let avail = width.saturating_sub(used + 1);
     let budget = if width >= 70 { (avail / 3).min(40) } else { 0 };
     let (mut chips, hidden) = fit_chips(&i.labels, budget);
@@ -187,6 +195,10 @@ fn item_line(
     spans.push(Span::raw(
         " ".repeat(pad.saturating_sub(usize::from(chips_w > 0))),
     ));
+    if let Some(text) = rabbit {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(text, Style::new().fg(Color::Black).bg(RABBIT)));
+    }
     spans.push(Span::styled(right, DIM));
     Line::from(spans)
 }
@@ -554,7 +566,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("   enter keep · esc clear", DIM),
         ]),
         Mode::Claude => {
-            let room = (area.width as usize).saturating_sub(34);
+            let room = (area.width as usize).saturating_sub(40);
             let shown = if app.input.chars().count() > room {
                 let skip = app.input.chars().count() - room;
                 format!("…{}", app.input.chars().skip(skip + 1).collect::<String>())
@@ -610,6 +622,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ];
                 if app.tab == Tab::Prs {
                     p.extend([("a", "approve"), ("m", "merge"), ("r", "repair")]);
+                    let open_threads = app
+                        .selected_item()
+                        .and_then(|i| i.rabbit)
+                        .is_some_and(|r| r.unresolved > 0);
+                    if open_threads {
+                        p.push(("t", "coderabbit"));
+                    }
                 }
                 p.extend([("c", "comment"), ("?", "help")]);
                 Line::from(keys(&p))
@@ -642,6 +661,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("x", "close (confirm)"),
         ("c", "comment"),
         ("r", "repair: run Claude on the PR"),
+        ("t", "resolve CodeRabbit threads with Claude"),
         ("q", "quit"),
         ("", "letters are not case sensitive"),
     ];
@@ -703,6 +723,7 @@ mod tests {
             labels: vec![],
             head: String::new(),
             base: String::new(),
+            rabbit: None,
         }
     }
 
@@ -823,6 +844,7 @@ mod tests {
                 },
             ],
             comments: vec![],
+            rabbit_threads: vec![],
             fetched: std::time::Instant::now(),
         }
     }
@@ -1186,6 +1208,136 @@ mod tests {
                     line.width()
                 );
             }
+        }
+    }
+
+    fn rabbit_thread(severity: &str, title: &str, resolved: bool) -> crate::gh::RabbitThread {
+        crate::gh::RabbitThread {
+            path: "src/lib.rs".into(),
+            line: Some(10),
+            resolved,
+            outdated: false,
+            severity: severity.into(),
+            title: title.into(),
+            url: format!("https://github.com/o/r/pull/1#discussion_{title}"),
+        }
+    }
+
+    #[test]
+    fn rows_show_open_coderabbit_threads_only() {
+        let mut item = labeled(1, &["bug"]);
+        item.rabbit = Some(crate::gh::Rabbit {
+            unresolved: 3,
+            total: 5,
+            capped: false,
+        });
+        let text = |l: Line| {
+            l.spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        let line = item_line(&item, false, 110, true, None, "");
+        assert!(text(line.clone()).contains("CR 3"));
+        assert!(line.width() <= 110);
+
+        item.rabbit = Some(crate::gh::Rabbit {
+            unresolved: 0,
+            total: 5,
+            capped: false,
+        });
+        assert!(!text(item_line(&item, false, 110, true, None, "")).contains("CR"));
+
+        item.rabbit = Some(crate::gh::Rabbit {
+            unresolved: 100,
+            total: 100,
+            capped: true,
+        });
+        assert!(text(item_line(&item, false, 110, true, None, "")).contains("CR 100+"));
+        for width in [50usize, 70, 90] {
+            assert!(item_line(&item, false, width, true, None, "└─").width() <= width);
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_lists_coderabbit_threads_with_a_hint_and_clicks() {
+        let mut app = app_with_detail(&sample_diff(2));
+        app.prs[0].rabbit = Some(crate::gh::Rabbit {
+            unresolved: 2,
+            total: 4,
+            capped: false,
+        });
+        {
+            let d = app.details.get_mut("id1").unwrap();
+            d.rabbit_threads = vec![
+                rabbit_thread("Major", "Handle errors", false),
+                rabbit_thread("Minor", "Rename the helper", false),
+                rabbit_thread("Nitpick", "Fix the typo", true),
+                rabbit_thread("Nitpick", "Trim whitespace", true),
+            ];
+        }
+        let out = render(&mut app, 130, 60);
+        assert!(out.contains("CodeRabbit"));
+        assert!(out.contains("2 open"));
+        assert!(out.contains("of 4"));
+        assert!(out.contains("press t to have Claude work through them"));
+        assert!(out.contains("Major"));
+        assert!(out.contains("Handle errors"));
+        assert!(out.contains("src/lib.rs:10"));
+        assert!(out.contains("Fix the typo"));
+        assert!(
+            app.check_hits
+                .iter()
+                .any(|(_, u)| u.contains("Handle errors")),
+            "threads are clickable"
+        );
+        let open_at = out.find("Handle errors").unwrap();
+        let checks_at = out.find("Checks").unwrap();
+        assert!(open_at < checks_at, "CodeRabbit sits above the checks");
+    }
+
+    #[tokio::test]
+    async fn resolved_threads_are_collapsed_after_three() {
+        let mut app = app_with_detail(&sample_diff(2));
+        app.prs[0].rabbit = Some(crate::gh::Rabbit {
+            unresolved: 0,
+            total: 5,
+            capped: false,
+        });
+        app.details.get_mut("id1").unwrap().rabbit_threads = (0..5)
+            .map(|n| rabbit_thread("Minor", &format!("done-{n}"), true))
+            .collect();
+        let out = render(&mut app, 130, 60);
+        assert!(out.contains("all resolved"));
+        assert!(out.contains("+2 more resolved"));
+        assert!(!out.contains("press t"));
+    }
+
+    #[tokio::test]
+    async fn badge_and_footer_hint_appear_only_with_open_threads() {
+        let mut app = app_with_detail(&sample_diff(2));
+        let out = render(&mut app, 130, 40);
+        assert!(!out.contains("CodeRabbit"));
+        assert!(!out.contains("coderabbit"));
+        app.prs[0].rabbit = Some(crate::gh::Rabbit {
+            unresolved: 2,
+            total: 2,
+            capped: false,
+        });
+        let out = render(&mut app, 130, 40);
+        assert!(out.contains("CodeRabbit 2 open"));
+        assert!(out.contains("t coderabbit"));
+    }
+
+    #[tokio::test]
+    async fn prompt_line_keeps_its_hint_at_any_width() {
+        for width in [60u16, 90, 130] {
+            let mut app = app_with_items();
+            app.mode = Mode::Claude;
+            app.input = "word ".repeat(80);
+            let out = render(&mut app, width, 12);
+            let last = out.lines().last().unwrap();
+            assert!(last.contains("esc cancel"), "{width}: {last}");
         }
     }
 }

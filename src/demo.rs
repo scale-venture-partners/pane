@@ -2,7 +2,9 @@
 
 use crate::app::{ClaudeRun, RunState};
 use crate::diff;
-use crate::gh::{parse_hex, Check, Ci, Comment, Detail, Item, Kind, Label, Snapshot};
+use crate::gh::{
+    parse_hex, Check, Ci, Comment, Detail, Item, Kind, Label, Rabbit, RabbitThread, Snapshot,
+};
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::time::{Duration as StdDuration, Instant};
@@ -54,6 +56,7 @@ fn item(kind: Kind, s: Spec) -> Item {
         ci: s.ci,
         gone: None,
         labels: s.labels,
+        rabbit: None,
         head: if kind == Kind::Pr && s.number == 482 {
             "mira/upload-rate-limit".to_string()
         } else if kind == Kind::Pr {
@@ -82,6 +85,119 @@ fn stack_on(prs: &mut [Item], child: u64, parent: u64) {
         .unwrap_or_default();
     if let Some(c) = prs.iter_mut().find(|p| p.number == child) {
         c.base = head;
+    }
+}
+
+fn set_rabbit(prs: &mut [Item], number: u64, unresolved: usize, total: usize) {
+    if let Some(p) = prs.iter_mut().find(|p| p.number == number) {
+        p.rabbit = Some(Rabbit {
+            unresolved,
+            total,
+            capped: false,
+        });
+    }
+}
+
+fn thread(
+    path: &str,
+    line: u64,
+    severity: &str,
+    title: &str,
+    resolved: bool,
+    outdated: bool,
+) -> RabbitThread {
+    RabbitThread {
+        path: path.into(),
+        line: Some(line),
+        resolved,
+        outdated,
+        severity: severity.into(),
+        title: title.into(),
+        url: "https://github.com/acme/example/pull/1#discussion_r1".into(),
+    }
+}
+
+fn demo_threads(number: u64) -> Vec<RabbitThread> {
+    match number {
+        482 => vec![
+            thread(
+                "lumen/limits.py",
+                34,
+                "Major",
+                "Handle Redis connection errors explicitly",
+                false,
+                false,
+            ),
+            thread(
+                "lumen/routes/upload.py",
+                36,
+                "Minor",
+                "Retry-After should never be zero",
+                false,
+                false,
+            ),
+            thread(
+                "tests/test_limits.py",
+                12,
+                "Minor",
+                "Cover the window rollover in a test",
+                false,
+                false,
+            ),
+            thread(
+                "docs/upload-limits.md",
+                3,
+                "Nitpick",
+                "Use consistent casing for \"API key\"",
+                true,
+                false,
+            ),
+            thread(
+                "lumen/limits.py",
+                30,
+                "Minor",
+                "Pin the Redis client timeout",
+                true,
+                true,
+            ),
+        ],
+        479 => vec![
+            thread(
+                "lumen/pagination.py",
+                52,
+                "Major",
+                "Cursor can overflow a signed 32-bit integer",
+                true,
+                false,
+            ),
+            thread(
+                "tests/test_pagination.py",
+                21,
+                "Minor",
+                "Assert the last page has no next cursor",
+                true,
+                false,
+            ),
+        ],
+        1198 => vec![
+            thread(
+                "src/theme/ThemeProvider.tsx",
+                18,
+                "Major",
+                "Guard against a missing theme on first paint",
+                false,
+                false,
+            ),
+            thread(
+                "src/theme/tokens.ts",
+                7,
+                "Nitpick",
+                "Prefer a const assertion for the token map",
+                true,
+                false,
+            ),
+        ],
+        _ => vec![],
     }
 }
 
@@ -259,6 +375,9 @@ pub fn snapshot() -> Snapshot {
             labels: vec![label("ui", "bfdadc")],
         }),
     ];
+    set_rabbit(&mut prs, 482, 3, 5);
+    set_rabbit(&mut prs, 479, 0, 2);
+    set_rabbit(&mut prs, 1198, 1, 2);
     stack_on(&mut prs, 484, 482);
     stack_on(&mut prs, 487, 484);
     stack_on(&mut prs, 1209, 1207);
@@ -668,6 +787,7 @@ pub fn details(snap: &Snapshot) -> HashMap<String, Detail> {
                 vec![]
             },
             checks: if is_pr { checks(i.ci, hero) } else { vec![] },
+            rabbit_threads: demo_threads(i.number),
             comments: if i.number == 475 {
                 vec![Comment {
                     author: "mira-k".into(),
@@ -769,6 +889,29 @@ pub fn diffs(snap: &Snapshot, details: &mut HashMap<String, Detail>) -> HashMap<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_coderabbit_counts_match_their_threads() {
+        let snap = snapshot();
+        let mut found = 0;
+        for pr in &snap.prs {
+            let threads = demo_threads(pr.number);
+            match pr.rabbit {
+                Some(r) => {
+                    found += 1;
+                    assert_eq!(r.total, threads.len(), "#{}", pr.number);
+                    assert_eq!(
+                        r.unresolved,
+                        threads.iter().filter(|t| !t.resolved).count(),
+                        "#{}",
+                        pr.number
+                    );
+                }
+                None => assert!(threads.is_empty()),
+            }
+        }
+        assert_eq!(found, 3);
+    }
 
     #[test]
     fn demo_has_stacked_prs() {

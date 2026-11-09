@@ -14,6 +14,8 @@ pub struct Config {
     pub repos: Vec<String>,
     /// Prompt sent to `claude -p` by the Claude action; editable before it runs.
     pub claude_prompt: String,
+    /// Prompt for the CodeRabbit action: have Claude work through unresolved CodeRabbit threads.
+    pub coderabbit_prompt: String,
     /// Extra arguments for `claude`. `claude -p` has nobody to approve prompts, so the default
     /// is auto mode, which approves routine actions on its own.
     pub claude_args: Vec<String>,
@@ -31,6 +33,7 @@ impl Default for Config {
             orgs: vec![],
             repos: vec![],
             claude_prompt: "Rebase this PR on its base branch and fix any failing checks.".into(),
+            coderabbit_prompt: "Work through the unresolved CodeRabbit review threads on this PR. List them with `gh api graphql` (reviewThreads); each CodeRabbit comment has a 'Prompt for AI Agents' section you can follow. For each thread decide whether the comment is valid: fix the valid ones in code, and reply on the thread in one sentence saying what you changed or why you disagree. Resolve every thread you handled (the `resolveReviewThread` mutation), run the project's checks, then push.".into(),
             claude_args: vec!["--permission-mode".into(), "auto".into()],
             claude_worktree: true,
             repo_roots: [
@@ -75,8 +78,8 @@ impl Config {
         if !["squash", "merge", "rebase"].contains(&self.merge_method.as_str()) {
             bail!("merge_method must be squash, merge or rebase");
         }
-        if self.claude_prompt.trim().is_empty() {
-            bail!("claude_prompt must not be empty");
+        if self.claude_prompt.trim().is_empty() || self.coderabbit_prompt.trim().is_empty() {
+            bail!("claude_prompt and coderabbit_prompt must not be empty");
         }
         if let Some(bad) = self.repos.iter().find(|r| !r.contains('/')) {
             bail!("repos entries must be owner/name, got {bad:?}");
@@ -119,6 +122,7 @@ mod tests {
     fn claude_defaults() {
         let c = Config::default();
         assert!(c.claude_prompt.contains("Rebase"));
+        assert!(c.coderabbit_prompt.contains("CodeRabbit"));
         assert!(c.claude_worktree);
         assert_eq!(c.claude_args, ["--permission-mode", "auto"]);
         assert!(!c.repo_roots.is_empty());
