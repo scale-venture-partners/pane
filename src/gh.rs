@@ -162,6 +162,8 @@ pub struct Item {
     /// PR head and base branch names; empty for issues.
     pub head: String,
     pub base: String,
+    /// The repo's default branch; empty if GitHub did not say.
+    pub default_branch: String,
     /// Set for PRs CodeRabbit has reviewed.
     pub rabbit: Option<Rabbit>,
 }
@@ -225,6 +227,9 @@ pub struct ActionReq {
     pub repo_full: String,
     pub number: u64,
     pub op: Op,
+    /// For merges into a non-default branch: the base branch, which must be the head of an
+    /// open PR (checked live) or the merge is refused.
+    pub merge_guard: Option<String>,
 }
 
 async fn graphql(query: &str, vars: &[(&str, &str)]) -> Result<Value> {
@@ -296,13 +301,13 @@ query($q:String!,$after:String){
       ... on PullRequest{
         id number title url updatedAt isDraft reviewDecision headRefName baseRefName
         labels(first:8){nodes{name color}}
-        author{login} repository{name nameWithOwner}
+        author{login} repository{name nameWithOwner defaultBranchRef{name}}
         commits(last:1){nodes{commit{statusCheckRollup{state}}}}
       }
       ... on Issue{
         id number title url updatedAt
         labels(first:8){nodes{name color}}
-        author{login} repository{name nameWithOwner}
+        author{login} repository{name nameWithOwner defaultBranchRef{name}}
       }
     }
   }
@@ -362,6 +367,13 @@ struct Repo {
     name: String,
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
+    #[serde(rename = "defaultBranchRef")]
+    default_branch_ref: Option<BranchRef>,
+}
+
+#[derive(Deserialize)]
+struct BranchRef {
+    name: String,
 }
 
 impl Node {
@@ -398,6 +410,11 @@ impl Node {
             labels,
             head: self.head_ref_name.unwrap_or_default(),
             base: self.base_ref_name.unwrap_or_default(),
+            default_branch: self
+                .repository
+                .default_branch_ref
+                .map(|b| b.name)
+                .unwrap_or_default(),
             rabbit: None,
         }
     }
@@ -774,7 +791,52 @@ pub fn action_args(req: &ActionReq) -> Vec<String> {
     a
 }
 
+const OPEN_PR_WITH_HEAD: &str = r#"
+query($owner:String!,$name:String!,$head:String!){
+  repository(owner:$owner,name:$name){
+    pullRequests(first:1,states:OPEN,headRefName:$head){nodes{number}}
+  }
+}"#;
+
+/// Number of an open PR whose head branch is `head`, checked live against GitHub.
+pub async fn open_pr_with_head(repo_full: &str, head: &str) -> Result<Option<u64>> {
+    let (owner, name) = repo_full
+        .split_once('/')
+        .context("repo must be owner/name")?;
+    let v = graphql(
+        OPEN_PR_WITH_HEAD,
+        &[("owner", owner), ("name", name), ("head", head)],
+    )
+    .await?;
+    Ok(first_pr_number(&v))
+}
+
+fn first_pr_number(v: &Value) -> Option<u64> {
+    nodes(v, "/data/repository/pullRequests/nodes")
+        .first()
+        .map(|n| num(n, "/number"))
+}
+
+pub fn merge_refusal(base: &str, default_branch: &str) -> String {
+    let target = if default_branch.is_empty() {
+        "the default branch"
+    } else {
+        default_branch
+    };
+    format!(
+        "can't merge into `{base}`: no open PR has it as its head, so the commits would be \
+         orphaned. Retarget to {target} first"
+    )
+}
+
 pub async fn run_action(req: &ActionReq) -> Result<String> {
+    if let (Op::Merge(_), Some(base)) = (&req.op, &req.merge_guard) {
+        match open_pr_with_head(&req.repo_full, base).await {
+            Ok(Some(_)) => {}
+            Ok(None) => bail!("{}", merge_refusal(base, "")),
+            Err(e) => bail!("couldn't verify that `{base}` has an open PR, so not merging: {e:#}"),
+        }
+    }
     let out = Command::new("gh")
         .args(action_args(req))
         .output()
@@ -999,6 +1061,7 @@ mod tests {
             repo_full: "o/r".into(),
             number: 3,
             op: Op::Comment("hi".into()),
+            merge_guard: None,
         };
         assert_eq!(
             action_args(&req),
@@ -1034,6 +1097,7 @@ mod tests {
             repo_full: "o/r".into(),
             number: 7,
             op: Op::Merge("squash".into()),
+            merge_guard: None,
         };
         assert_eq!(
             action_args(&req),
@@ -1048,6 +1112,7 @@ mod tests {
             repo_full: "o/r".into(),
             number: 7,
             op: Op::Draft,
+            merge_guard: None,
         };
         assert_eq!(
             action_args(&req),
@@ -1081,6 +1146,51 @@ mod tests {
                 name: "bug".into(),
                 rgb: (0xd7, 0x3a, 0x4a)
             }]
+        );
+    }
+
+    #[test]
+    fn open_pr_lookup_reads_the_first_node() {
+        let none = serde_json::json!({"data": {"repository": {"pullRequests": {"nodes": []}}}});
+        assert_eq!(first_pr_number(&none), None);
+        let one = serde_json::json!({"data": {"repository": {"pullRequests": {"nodes": [{"number": 7}]}}}});
+        assert_eq!(first_pr_number(&one), Some(7));
+        assert_eq!(first_pr_number(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn refusal_names_the_branch_and_the_fix() {
+        let m = merge_refusal("feat/a", "develop");
+        assert!(
+            m.contains("`feat/a`")
+                && m.contains("orphaned")
+                && m.contains("Retarget to develop first")
+        );
+        assert!(merge_refusal("x", "").contains("the default branch"));
+    }
+
+    #[test]
+    fn list_nodes_carry_the_default_branch() {
+        let json = serde_json::json!({
+            "id": "PR_1", "number": 1, "title": "t", "url": "u",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "repository": {"name": "r", "nameWithOwner": "o/r", "defaultBranchRef": {"name": "develop"}}
+        });
+        let item = serde_json::from_value::<Node>(json)
+            .unwrap()
+            .into_item(Kind::Pr);
+        assert_eq!(item.default_branch, "develop");
+        let bare = serde_json::json!({
+            "id": "PR_2", "number": 2, "title": "t", "url": "u",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "repository": {"name": "r", "nameWithOwner": "o/r"}
+        });
+        assert_eq!(
+            serde_json::from_value::<Node>(bare)
+                .unwrap()
+                .into_item(Kind::Pr)
+                .default_branch,
+            ""
         );
     }
 }

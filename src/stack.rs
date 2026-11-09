@@ -128,6 +128,7 @@ mod tests {
             labels: vec![],
             head: head.into(),
             base: base.into(),
+            default_branch: "main".into(),
             rabbit: None,
         }
     }

@@ -260,6 +260,31 @@ impl App {
             .is_some_and(|r| matches!(r.state, RunState::Running))
     }
 
+    /// Why `item` must not be merged yet, or `None` if it may be. A PR into the default branch
+    /// (or an allowed one) is fine; a PR into any other branch needs an open PR whose head is
+    /// that branch, otherwise merging would orphan the commits (the usual cause: a stack whose
+    /// parent was already merged into the default branch).
+    pub fn merge_block_reason(&self, item: &Item) -> Option<String> {
+        if item.kind != gh::Kind::Pr || item.base.is_empty() || self.base_is_safe(item) {
+            return None;
+        }
+        let parent_open = self.prs.iter().any(|p| {
+            p.repo_full == item.repo_full
+                && p.head == item.base
+                && p.gone.is_none()
+                && p.id != item.id
+        });
+        (!parent_open).then(|| gh::merge_refusal(&item.base, &item.default_branch))
+    }
+
+    /// The base is a default branch (`main`, `master`, or the repo's own) or allowed by config.
+    fn base_is_safe(&self, item: &Item) -> bool {
+        item.base == "main"
+            || item.base == "master"
+            || (!item.default_branch.is_empty() && item.base == item.default_branch)
+            || self.cfg.allows_merge_into(&item.base)
+    }
+
     /// Opens the prompt editor prefilled with `prompt`; Enter then runs it on the selected PR.
     fn edit_claude_prompt(&mut self, prompt: String) {
         if self.ghost_selected() {
@@ -988,11 +1013,15 @@ impl App {
                 _ => None,
             },
         };
+        let merge_guard =
+            (matches!(op, Op::Merge(_)) && !item.base.is_empty() && !self.base_is_safe(&item))
+                .then(|| item.base.clone());
         let req = ActionReq {
             kind: item.kind,
             repo_full: item.repo_full.clone(),
             number: item.number,
             op,
+            merge_guard,
         };
         self.set_status(format!("running on {}#{}…", item.repo, item.number), false);
         let tx = self.tx.clone();
@@ -1121,8 +1150,17 @@ impl App {
             KeyCode::Char('x') => self.confirm(Op::Close),
             KeyCode::Char('a') if is_pr => self.confirm(Op::Approve),
             KeyCode::Char('m') if is_pr => {
-                let m = self.cfg.merge_method.clone();
-                self.confirm(Op::Merge(m))
+                let blocked = self
+                    .selected_item()
+                    .filter(|i| i.gone.is_none())
+                    .and_then(|i| self.merge_block_reason(&i));
+                match blocked {
+                    Some(reason) => self.set_status(reason, true),
+                    None => {
+                        let m = self.cfg.merge_method.clone();
+                        self.confirm(Op::Merge(m))
+                    }
+                }
             }
             KeyCode::Char('w') if is_pr => {
                 let op = match self.selected_item() {
@@ -1244,6 +1282,7 @@ mod tests {
             labels: vec![],
             head: String::new(),
             base: String::new(),
+            default_branch: "main".into(),
             rabbit: None,
         }
     }
@@ -2339,5 +2378,134 @@ mod tests {
         }
         assert!(CLAUDE_REFRESH_AT.last().unwrap() >= &Duration::from_secs(30));
         assert!(CLAUDE_REFRESH_AT.len() > ACTION_REFRESH_AT.len());
+    }
+
+    fn pr_into(repo: &str, number: u64, head: &str, base: &str) -> Item {
+        let mut i = item(repo, number, number as u32);
+        i.head = head.into();
+        i.base = base.into();
+        i
+    }
+
+    fn merge_app(prs: Vec<Item>, cfg: Config) -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(cfg, tx, Arc::new(Notify::new()));
+        app.demo = true;
+        app.update(Msg::List(Ok(lists_snapshot(prs))));
+        app
+    }
+
+    #[tokio::test]
+    async fn merging_into_the_default_branch_is_always_allowed() {
+        let mut develop = pr_into("a", 3, "f3", "develop");
+        develop.default_branch = "develop".into();
+        let app = merge_app(
+            vec![
+                pr_into("a", 1, "f1", "main"),
+                pr_into("a", 2, "f2", "master"),
+                develop.clone(),
+            ],
+            Config::default(),
+        );
+        for pr in &app.prs {
+            assert_eq!(app.merge_block_reason(pr), None, "{}", pr.base);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stack_may_merge_into_its_open_parent_but_not_into_a_merged_one() {
+        let parent = pr_into("a", 1, "parent-branch", "main");
+        let child = pr_into("a", 2, "child-branch", "parent-branch");
+        let mut app = merge_app(vec![parent, child.clone()], Config::default());
+        assert_eq!(app.merge_block_reason(&child), None, "parent PR is open");
+
+        // the parent merges (locally known): its branch no longer has an open PR
+        let pid = app.prs.iter().find(|p| p.number == 1).unwrap().id.clone();
+        app.prs.iter_mut().find(|p| p.id == pid).unwrap().gone = Some("MERGED".into());
+        let reason = app.merge_block_reason(&child).unwrap();
+        assert!(
+            reason.contains("`parent-branch`") && reason.contains("orphaned"),
+            "{reason}"
+        );
+
+        // or it vanished from the list entirely
+        app.prs.retain(|p| p.number != 1);
+        assert!(app.merge_block_reason(&child).is_some());
+    }
+
+    #[tokio::test]
+    async fn only_an_open_pr_in_the_same_repo_counts_as_the_parent() {
+        let other_repo_parent = pr_into("other", 1, "shared-name", "main");
+        let child = pr_into("a", 2, "child", "shared-name");
+        let app = merge_app(vec![other_repo_parent, child.clone()], Config::default());
+        assert!(app.merge_block_reason(&child).is_some());
+
+        let itself = pr_into("a", 5, "loop", "loop");
+        let app = merge_app(vec![itself.clone()], Config::default());
+        assert!(
+            app.merge_block_reason(&itself).is_some(),
+            "a PR is not its own parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn long_lived_branches_can_be_allowed_by_config() {
+        let release = pr_into("a", 1, "hotfix", "release/1.2");
+        let cfg = Config {
+            allow_merge_into: vec!["release/*".into()],
+            ..Config::default()
+        };
+        let app = merge_app(vec![release.clone()], cfg);
+        assert_eq!(app.merge_block_reason(&release), None);
+        let strict = merge_app(vec![release.clone()], Config::default());
+        assert!(strict.merge_block_reason(&release).is_some());
+    }
+
+    #[tokio::test]
+    async fn issues_and_unknown_bases_are_not_blocked() {
+        let mut issue = pr_into("a", 1, "", "");
+        issue.kind = gh::Kind::Issue;
+        let mut app = merge_app(vec![], Config::default());
+        assert_eq!(app.merge_block_reason(&issue), None);
+        let unknown = pr_into("a", 2, "x", "");
+        app.prs.push(unknown.clone());
+        assert_eq!(app.merge_block_reason(&unknown), None);
+    }
+
+    #[tokio::test]
+    async fn the_merge_key_refuses_a_blocked_pr_and_confirms_an_allowed_one() {
+        let mut app = merge_app(
+            vec![pr_into("a", 1, "orphan-risk", "dead-branch")],
+            Config::default(),
+        );
+        press(&mut app, KeyCode::Char('m'));
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "no confirmation is offered"
+        );
+        assert!(app.status.as_ref().is_some_and(|s| s.error
+            && s.text.contains("`dead-branch`")
+            && s.text.contains("Retarget")));
+
+        let mut app = merge_app(vec![pr_into("a", 1, "ok", "main")], Config::default());
+        press(&mut app, KeyCode::Char('m'));
+        assert!(matches!(app.mode, Mode::Confirm(Op::Merge(_))));
+    }
+
+    #[tokio::test]
+    async fn other_actions_are_not_blocked_on_such_a_pr() {
+        let mut app = merge_app(
+            vec![pr_into("a", 1, "orphan-risk", "dead-branch")],
+            Config::default(),
+        );
+        for (key, expect_confirm) in [('a', true), ('x', true), ('w', true)] {
+            press(&mut app, KeyCode::Char(key));
+            assert_eq!(
+                matches!(app.mode, Mode::Confirm(_)),
+                expect_confirm,
+                "{key}"
+            );
+            press(&mut app, KeyCode::Char('n'));
+        }
     }
 }

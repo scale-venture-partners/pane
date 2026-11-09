@@ -485,6 +485,12 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
             err,
             inner.width as usize,
             app.runs.get(&item.id).map(|r| (r, app.spinner())),
+            if item.gone.is_none() {
+                app.merge_block_reason(&item)
+            } else {
+                None
+            }
+            .as_deref(),
         )
     } else if let Some(e) = app.detail_err.get(&item.id) {
         DetailView::plain(Text::from(vec![Line::styled(
@@ -838,6 +844,7 @@ mod tests {
             labels: vec![],
             head: String::new(),
             base: String::new(),
+            default_branch: "main".into(),
             rabbit: None,
         }
     }
@@ -1607,5 +1614,24 @@ mod tests {
             Ok(Snapshot::default()),
         ));
         assert!(!footer(&mut app, 140).contains("lumen-api"));
+    }
+
+    #[tokio::test]
+    async fn detail_warns_when_the_base_has_no_open_pr() {
+        let mut app = app_with_detail(&sample_diff(2));
+        app.prs[0].base = "dead-branch".into();
+        app.prs[0].head = "feature".into();
+        let out = render(&mut app, 130, 40);
+        assert!(out.contains("MERGE BLOCKED"), "{out}");
+        assert!(out.contains("can't merge into `dead-branch`"));
+        assert!(out.contains("Retarget to main first") || out.contains("Retarget to"));
+    }
+
+    #[tokio::test]
+    async fn detail_has_no_warning_for_a_normal_pr() {
+        let mut app = app_with_detail(&sample_diff(2));
+        let out = render(&mut app, 130, 40);
+        assert!(!out.contains("MERGE BLOCKED"));
+        assert!(!out.contains("can't merge"));
     }
 }

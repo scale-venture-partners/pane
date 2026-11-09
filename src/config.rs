@@ -14,6 +14,9 @@ pub struct Config {
     pub repos: Vec<String>,
     /// Prompt sent to `claude -p` by the Claude action; editable before it runs.
     pub claude_prompt: String,
+    /// Branches (exact, or `prefix*`) PRs may be merged into even without an open PR for them,
+    /// besides the default branch. Meant for long-lived branches such as `release/*`.
+    pub allow_merge_into: Vec<String>,
     /// Prompt for the CodeRabbit action: have Claude work through unresolved CodeRabbit threads.
     pub coderabbit_prompt: String,
     /// Extra arguments for `claude`. `claude -p` has nobody to approve prompts, so the default
@@ -33,6 +36,7 @@ impl Default for Config {
             orgs: vec![],
             repos: vec![],
             claude_prompt: "Rebase this PR on its base branch and fix any failing checks.".into(),
+            allow_merge_into: vec![],
             coderabbit_prompt: "Work through the unresolved CodeRabbit review threads on this PR. List them with `gh api graphql` (reviewThreads); each CodeRabbit comment has a 'Prompt for AI Agents' section you can follow. For each thread decide whether the comment is valid: fix the valid ones in code, and reply on the thread in one sentence saying what you changed or why you disagree. Resolve every thread you handled (the `resolveReviewThread` mutation), run the project's checks, then push.".into(),
             claude_args: vec!["--permission-mode".into(), "auto".into()],
             claude_worktree: true,
@@ -71,6 +75,16 @@ pub fn load() -> Result<Config> {
 }
 
 impl Config {
+    /// Whether `branch` is listed in `allow_merge_into` (exact name, or `prefix*`).
+    pub fn allows_merge_into(&self, branch: &str) -> bool {
+        self.allow_merge_into
+            .iter()
+            .any(|pat| match pat.strip_suffix('*') {
+                Some(prefix) => branch.starts_with(prefix),
+                None => pat == branch,
+            })
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.refresh_secs < 15 {
             bail!("refresh_secs must be at least 15 to stay within GitHub rate limits");
@@ -80,6 +94,9 @@ impl Config {
         }
         if self.claude_prompt.trim().is_empty() || self.coderabbit_prompt.trim().is_empty() {
             bail!("claude_prompt and coderabbit_prompt must not be empty");
+        }
+        if self.allow_merge_into.iter().any(|b| b.trim().is_empty()) {
+            bail!("allow_merge_into entries must not be empty");
         }
         if let Some(bad) = self.repos.iter().find(|r| !r.contains('/')) {
             bail!("repos entries must be owner/name, got {bad:?}");
@@ -163,5 +180,28 @@ mod tests {
         c.validate().unwrap();
         assert_eq!(c.orgs, ["acme"]);
         assert_eq!(c.repos, ["acme/tool"]);
+    }
+
+    #[test]
+    fn allow_merge_into_matches_exact_names_and_prefixes() {
+        let c = Config {
+            allow_merge_into: vec!["staging".into(), "release/*".into()],
+            ..Config::default()
+        };
+        assert!(c.allows_merge_into("staging"));
+        assert!(c.allows_merge_into("release/1.2"));
+        assert!(c.allows_merge_into("release/"));
+        assert!(!c.allows_merge_into("staging-2"));
+        assert!(!c.allows_merge_into("releases/1"));
+        assert!(!Config::default().allows_merge_into("anything"));
+    }
+
+    #[test]
+    fn rejects_empty_allow_entries() {
+        let c = Config {
+            allow_merge_into: vec![" ".into()],
+            ..Config::default()
+        };
+        assert!(c.validate().is_err());
     }
 }
