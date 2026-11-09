@@ -1,6 +1,7 @@
 use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::Instant;
@@ -309,7 +310,8 @@ async fn search(scope: &str, kind: Kind) -> Result<(Vec<Item>, u64)> {
     Ok((items, remaining))
 }
 
-pub async fn fetch_all(cfg: &Config) -> Result<Snapshot> {
+/// `on_progress(done, total)` is called as each search query finishes.
+pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Result<Snapshot> {
     let login = if cfg.orgs.is_empty() && cfg.repos.is_empty() {
         Some(viewer().await?)
     } else {
@@ -321,7 +323,14 @@ pub async fn fetch_all(cfg: &Config) -> Result<Snapshot> {
             .into_iter()
             .map(move |k| async move { search(s, k).await.map(|r| (k, r)) })
     });
-    let results = futures::future::try_join_all(jobs).await?;
+    let mut pending: FuturesUnordered<_> = jobs.collect();
+    let total = pending.len();
+    on_progress(0, total);
+    let mut results = Vec::with_capacity(total);
+    while let Some(r) = pending.next().await {
+        results.push(r?);
+        on_progress(results.len(), total);
+    }
     let mut snap = Snapshot::default();
     let mut rate = u64::MAX;
     for (kind, (items, remaining)) in results {

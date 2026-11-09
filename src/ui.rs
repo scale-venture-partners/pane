@@ -167,7 +167,7 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
     } else if let Some(t) = app.last_ok {
         Span::styled(format!("updated {}s ago", t.elapsed().as_secs()), DIM)
     } else {
-        Span::styled("loading…", DIM)
+        Span::styled(format!("{} loading…", app.spinner()), Color::Yellow)
     };
     let mut right = vec![sync];
     if app.fetch_error.is_some() {
@@ -233,24 +233,102 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     app.list_state.select(sel_row);
 
     if rows.is_empty() {
-        let msg = if app.last_ok.is_none() {
-            "loading…"
+        if app.last_ok.is_none() {
+            draw_loading(f, app, area, block);
         } else {
-            "nothing open"
-        };
-        f.render_widget(
-            Paragraph::new(msg)
-                .style(Style::new().fg(DIM))
-                .alignment(Alignment::Center)
-                .block(block),
-            area,
-        );
+            f.render_widget(
+                Paragraph::new("nothing open")
+                    .style(Style::new().fg(DIM))
+                    .alignment(Alignment::Center)
+                    .block(block),
+                area,
+            );
+        }
         return;
     }
     let list = List::new(rows)
         .block(block)
         .highlight_style(Style::new().bg(SEL_BG).bold());
     f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    truncate(&s.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+fn loading_lines(app: &App) -> Vec<Line<'static>> {
+    let spin = app.spinner();
+    let mut out = vec![Line::styled(
+        "Loading your pull requests and issues",
+        Style::new().bold(),
+    )];
+    out.push(Line::raw(""));
+    out.push(match (&app.viewer, &app.viewer_err) {
+        (Some(v), _) => Line::from(vec![
+            Span::styled("✓ ", Color::Green),
+            Span::raw(format!("Signed in to GitHub as @{v}")),
+        ]),
+        (None, Some(e)) => Line::from(vec![
+            Span::styled("✗ ", Color::Red),
+            Span::styled(
+                format!("gh is not signed in: {}", one_line(e, 48)),
+                Color::Red,
+            ),
+        ]),
+        (None, None) => Line::from(vec![
+            Span::styled(format!("{spin} "), Color::Yellow),
+            Span::raw("Checking GitHub sign-in via gh"),
+        ]),
+    });
+    out.push(match (&app.fetch_error, app.progress) {
+        (Some(_), _) if app.viewer_err.is_some() => Line::raw(""),
+        (Some(e), _) => Line::from(vec![
+            Span::styled("✗ ", Color::Red),
+            Span::styled(
+                format!("Could not load from GitHub: {}", one_line(e, 48)),
+                Color::Red,
+            ),
+        ]),
+        (None, Some((done, total))) => Line::from(vec![
+            Span::styled(format!("{spin} "), Color::Yellow),
+            Span::raw(format!(
+                "Fetching from GitHub ({done}/{total} searches done)"
+            )),
+        ]),
+        (None, None) => Line::from(vec![
+            Span::styled(format!("{spin} "), Color::Yellow),
+            Span::raw("Starting"),
+        ]),
+    });
+    out.push(Line::raw(""));
+    out.push(if app.fetch_error.is_some() {
+        Line::styled(
+            "Check `gh auth status`. pane retries automatically, or press r.",
+            DIM,
+        )
+    } else {
+        Line::styled(
+            "The first load takes a few seconds; after that pane refreshes in the background.",
+            DIM,
+        )
+    });
+    out
+}
+
+fn draw_loading(f: &mut Frame, app: &App, area: Rect, block: Block<'_>) {
+    let lines = loading_lines(app);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let width = widest.min(inner.width).min(80);
+    let top = inner.height.saturating_sub(lines.len() as u16) / 2;
+    let rect = Rect {
+        x: inner.x + (inner.width - width) / 2,
+        y: inner.y + top,
+        width,
+        height: inner.height - top,
+    };
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rect);
 }
 
 fn badge(text: String, color: Color) -> Span<'static> {
@@ -492,7 +570,7 @@ fn detail_text(item: &Item, d: &Detail, diff: Option<&str>, diff_err: Option<&st
                 format!("failed to load diff: {e}"),
                 Color::Red,
             )),
-            (None, None) => t.push(Line::styled("loading diff…", DIM)),
+            (None, None) => t.push(Line::styled("loading diff…", Color::Yellow)),
         }
     }
     DetailView {
@@ -542,7 +620,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         }
     } else {
         DetailView {
-            text: Text::styled("loading…", DIM),
+            text: Text::styled(format!("{} loading…", app.spinner()), DIM),
             check_lines: vec![],
             diff_line: None,
         }
@@ -924,5 +1002,56 @@ mod tests {
         app.detail_scroll = u16::MAX;
         let out = render(&mut app, 130, 30);
         assert!(out.contains("failed to load diff: too large"));
+    }
+
+    fn fresh_app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(Config::default(), tx, Arc::new(tokio::sync::Notify::new()))
+    }
+
+    #[tokio::test]
+    async fn first_load_shows_loading_screen() {
+        let mut app = fresh_app();
+        let out = render(&mut app, 100, 20);
+        assert!(out.contains("Loading your pull requests and issues"));
+        assert!(out.contains("Checking GitHub sign-in"));
+    }
+
+    #[tokio::test]
+    async fn loading_screen_reports_progress_and_auth() {
+        let mut app = fresh_app();
+        app.update(crate::app::Msg::Viewer(Ok("octocat".into())));
+        app.update(crate::app::Msg::Progress(3, 8));
+        let out = render(&mut app, 100, 20);
+        assert!(out.contains("Signed in to GitHub as @octocat"));
+        assert!(out.contains("3/8 searches done"));
+    }
+
+    #[tokio::test]
+    async fn loading_screen_explains_fetch_failure() {
+        let mut app = fresh_app();
+        app.update(crate::app::Msg::Viewer(Ok("octocat".into())));
+        app.update(crate::app::Msg::List(Err("HTTP 401".into())));
+        let out = render(&mut app, 100, 20);
+        assert!(out.contains("Could not load from GitHub: HTTP 401"));
+        assert!(out.contains("gh auth status"));
+    }
+
+    #[tokio::test]
+    async fn loading_screen_explains_missing_sign_in() {
+        let mut app = fresh_app();
+        app.update(crate::app::Msg::List(Err("HTTP 401".into())));
+        app.update(crate::app::Msg::Viewer(Err("not logged in".into())));
+        let out = render(&mut app, 100, 20);
+        assert!(out.contains("gh is not signed in: not logged in"));
+        assert!(!out.contains("Could not load"));
+    }
+
+    #[tokio::test]
+    async fn spinner_advances_with_ticks() {
+        let mut app = fresh_app();
+        let a = app.spinner();
+        app.update(crate::app::Msg::Tick);
+        assert_ne!(a, app.spinner());
     }
 }

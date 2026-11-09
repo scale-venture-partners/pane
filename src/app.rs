@@ -20,6 +20,7 @@ pub enum Msg {
     Term(Event),
     Tick,
     Loading,
+    Progress(usize, usize),
     List(Result<Snapshot, String>),
     Viewer(Result<String, String>),
     Detail(String, Result<Detail, String>),
@@ -50,6 +51,9 @@ pub struct Status {
 pub struct App {
     pub cfg: Config,
     pub viewer: Option<String>,
+    pub viewer_err: Option<String>,
+    pub progress: Option<(usize, usize)>,
+    pub frame: usize,
     pub prs: Vec<Item>,
     pub issues: Vec<Item>,
     pub tab: Tab,
@@ -111,6 +115,9 @@ impl App {
         Self {
             cfg,
             viewer: None,
+            viewer_err: None,
+            progress: None,
+            frame: 0,
             prs: vec![],
             issues: vec![],
             tab: Tab::Prs,
@@ -146,6 +153,11 @@ impl App {
             tx,
             refresh,
         }
+    }
+
+    pub fn spinner(&self) -> &'static str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        FRAMES[self.frame % FRAMES.len()]
     }
 
     pub fn items(&self) -> &[Item] {
@@ -326,6 +338,7 @@ impl App {
             Msg::Term(Event::Key(k)) if k.kind == KeyEventKind::Press => self.on_key(k),
             Msg::Term(Event::Mouse(m)) => self.on_mouse(m),
             Msg::Term(_) | Msg::Tick => {
+                self.frame = self.frame.wrapping_add(1);
                 if self
                     .status
                     .as_ref()
@@ -334,10 +347,14 @@ impl App {
                     self.status = None;
                 }
             }
-            Msg::Loading => self.loading = true,
+            Msg::Loading => {
+                self.loading = true;
+                self.progress = None;
+            }
+            Msg::Progress(done, total) => self.progress = Some((done, total)),
             Msg::List(r) => self.on_list(r),
             Msg::Viewer(Ok(v)) => self.viewer = Some(v),
-            Msg::Viewer(Err(e)) => self.set_status(format!("viewer lookup failed: {e}"), true),
+            Msg::Viewer(Err(e)) => self.viewer_err = Some(e),
             Msg::Detail(id, r) => {
                 self.inflight.remove(&id);
                 match r {

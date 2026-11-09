@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     }
     let cfg = config::load()?;
     if std::env::args().any(|a| a == "--check") {
-        let snap = gh::fetch_all(&cfg).await?;
+        let snap = gh::fetch_all(&cfg, |_, _| {}).await?;
         for i in snap
             .prs
             .iter()
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
 
     let tick_tx = tx.clone();
     tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_secs(1));
+        let mut iv = tokio::time::interval(Duration::from_millis(100));
         loop {
             iv.tick().await;
             if tick_tx.send(Msg::Tick).is_err() {
@@ -71,7 +71,12 @@ async fn main() -> Result<()> {
                 _ = notify.notified() => iv.reset(),
             }
             let _ = list_tx.send(Msg::Loading);
-            let r = gh::fetch_all(&list_cfg).await.map_err(|e| format!("{e:#}"));
+            let progress_tx = list_tx.clone();
+            let r = gh::fetch_all(&list_cfg, move |done, total| {
+                let _ = progress_tx.send(Msg::Progress(done, total));
+            })
+            .await
+            .map_err(|e| format!("{e:#}"));
             if list_tx.send(Msg::List(r)).is_err() {
                 break;
             }
