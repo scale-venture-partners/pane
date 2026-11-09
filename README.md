@@ -82,7 +82,7 @@ Optional file at `~/.config/pane/config.toml` (or `$XDG_CONFIG_HOME/pane/config.
 | `orgs` | `[]` | show every open item in these orgs |
 | `repos` | `[]` | extra `owner/name` repos to show |
 | `claude_prompt` | `"Rebase this PR on its base branch and fix any failing checks."` | default prompt for the Claude action |
-| `claude_args` | `["--permission-mode", "acceptEdits"]` | extra arguments for `claude` |
+| `claude_args` | `["--permission-mode", "auto"]` | extra arguments for `claude` |
 | `claude_worktree` | `true` | run Claude in its own git worktree |
 | `repo_roots` | `~/code`, `~/src`, `~/dev`, `~/projects`, `~/GitHub`, `~/Documents/GitHub` | where to look for local clones |
 
@@ -96,7 +96,7 @@ When both `orgs` and `repos` are empty, pane shows items that involve you.
 
 Press `r` (repair) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background; the PR row shows a spinner and the header counts running jobs. When a job finishes, the status bar shows the first line of what Claude said. `t` lists every run with Claude's full reply (cut to a few lines), the log path, and a warning if it left work behind; `o` there opens the newest log.
 
-- **Your Claude setup:** the job inherits your environment and runs `claude` exactly as you would, so your global settings, credentials, hooks and permission rules apply. `claude -p` has nobody to approve prompts, so pane passes `--permission-mode acceptEdits` by default so it can edit files. Everything else (running `git push`, for instance) still follows your permission rules and is denied if they don't allow it; the run then ends with Claude explaining what it was blocked on. Change this with `claude_args` (for example `["--permission-mode", "auto"]`, or `[]` to use only your own settings).
+- **Your Claude setup:** the job inherits your environment and runs `claude` exactly as you would, so your global settings, credentials, hooks and permission rules apply. `claude -p` has nobody to approve prompts, so pane passes `--permission-mode auto` by default: Claude's auto mode approves routine actions (editing files, running git) on its own, while risky ones are still blocked, and the run then ends with Claude explaining what it was blocked on. Change this with `claude_args` (for example `["--permission-mode", "acceptEdits"]` to be stricter, or `[]` to use only your own settings).
 - **Where it runs:** in your local clone of the repo, found by matching `origin` against the PR's repository under `repo_roots`.
 - **Isolation:** by default each job gets its own git worktree (`.claude/worktrees/`, added to the repo's local `.git/info/exclude`), so your working copy is untouched. When the job ends, the worktree is deleted if it has no uncommitted changes and everything is pushed; otherwise it is kept and its path is reported. Set `claude_worktree = false` to run in the checkout itself.
 - **Context:** the prompt is prefixed with the PR number, title, URL, and head and base branches.

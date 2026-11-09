@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn args_use_worktree_and_extra_flags() {
         let mut cfg = Config {
-            claude_args: vec!["--permission-mode".into(), "acceptEdits".into()],
+            claude_args: vec!["--permission-mode".into(), "auto".into()],
             ..Config::default()
         };
         let a = command_args(&cfg, &item());
@@ -414,7 +414,7 @@ mod tests {
                 "-p",
                 "--worktree=pane-some-repo-pr42",
                 "--permission-mode",
-                "acceptEdits"
+                "auto"
             ]
         );
         cfg.claude_worktree = false;

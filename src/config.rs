@@ -15,7 +15,7 @@ pub struct Config {
     /// Prompt sent to `claude -p` by the Claude action; editable before it runs.
     pub claude_prompt: String,
     /// Extra arguments for `claude`. `claude -p` has nobody to approve prompts, so the default
-    /// lets it edit files; other tools still follow your global permission rules.
+    /// is auto mode, which approves routine actions on its own.
     pub claude_args: Vec<String>,
     /// Run Claude in its own git worktree so your checkout is left alone.
     pub claude_worktree: bool,
@@ -31,7 +31,7 @@ impl Default for Config {
             orgs: vec![],
             repos: vec![],
             claude_prompt: "Rebase this PR on its base branch and fix any failing checks.".into(),
-            claude_args: vec!["--permission-mode".into(), "acceptEdits".into()],
+            claude_args: vec!["--permission-mode".into(), "auto".into()],
             claude_worktree: true,
             repo_roots: [
                 "~/code",
@@ -120,7 +120,7 @@ mod tests {
         let c = Config::default();
         assert!(c.claude_prompt.contains("Rebase"));
         assert!(c.claude_worktree);
-        assert_eq!(c.claude_args, ["--permission-mode", "acceptEdits"]);
+        assert_eq!(c.claude_args, ["--permission-mode", "auto"]);
         assert!(!c.repo_roots.is_empty());
     }
 

@@ -14,5 +14,5 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Redesigned PR details: badge row, branch chips, size and check progress bars, Markdown rendering, and a diff view with file summary, line numbers, tinted rows and `]`/`[` file jumping.
 - `--demo` mode with fictional data, and README screenshots generated from it.
 - Claude action: press `r` (repair) on a PR to run `claude -p` in the background in the local clone, in an isolated worktree, with an editable default prompt, a run list, and logs.
-- Claude runs show what Claude replied (status bar and run list), flag runs that left work in a worktree, and default to `--permission-mode acceptEdits`.
+- Claude runs show what Claude replied (status bar and run list), flag runs that left work in a worktree, and default to `--permission-mode auto`.
 - Configurable orgs, repos, refresh interval and merge method.
