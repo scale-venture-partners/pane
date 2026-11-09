@@ -5,6 +5,8 @@
 
 A live terminal dashboard for your open GitHub pull requests and issues. Leave it running in a terminal pane all day; it polls GitHub at a polite rate and keeps the list current.
 
+![PR list with a pull request card showing badges, reviews and checks](docs/screenshots/overview.png)
+
 - PRs and issues in two tabs, grouped by repo, most recently active repo first.
 - PR details are laid out as a card: state, review, CI and merge badges, branch chips, a `+/−` size bar, a check progress bar, rendered Markdown descriptions and comments (headings, lists, tasks, code blocks, links), and a diff with a file summary, line-number gutters and tinted added/removed rows.
 - Per PR at a glance: CI state `●`, review state `✓ ✗ ○`, draft `◇`.
@@ -14,6 +16,25 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears.
 - Basic actions without leaving the terminal: open in browser, copy URL, comment, approve, merge, close, toggle draft. Anything that writes asks `y/N` first.
 - Filter by text, show only your own items, full mouse support.
+
+<details>
+<summary>More screenshots</summary>
+
+Descriptions and comments render as Markdown:
+
+![Rendered Markdown description and comments](docs/screenshots/description.png)
+
+A diff with a file summary, line numbers and tinted rows:
+
+![Diff view](docs/screenshots/diff.png)
+
+Issues get the same treatment, labels included:
+
+![Issues tab](docs/screenshots/issues.png)
+
+</details>
+
+Try it without a GitHub account: `pane --demo` runs on fictional data.
 
 ## Install
 
@@ -60,6 +81,8 @@ Optional file at `~/.config/pane/config.toml` (or `$XDG_CONFIG_HOME/pane/config.
 | `repos` | `[]` | extra `owner/name` repos to show |
 
 When both `orgs` and `repos` are empty, pane shows items that involve you.
+
+`pane --demo` runs the UI on fictional data, with no network. `scripts/screenshots.sh` regenerates the screenshots above from it.
 
 `pane --check` prints the URL of every item pane would show, then exits. Handy for verifying a config.
 

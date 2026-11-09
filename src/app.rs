@@ -52,6 +52,8 @@ pub struct App {
     pub cfg: Config,
     pub viewer: Option<String>,
     pub viewer_err: Option<String>,
+    /// Fake data, no network: see `pane --demo`.
+    pub demo: bool,
     pub progress: Option<(usize, usize)>,
     pub frame: usize,
     pub prs: Vec<Item>,
@@ -117,6 +119,7 @@ impl App {
             cfg,
             viewer: None,
             viewer_err: None,
+            demo: false,
             progress: None,
             frame: 0,
             prs: vec![],
@@ -155,6 +158,23 @@ impl App {
             tx,
             refresh,
         }
+    }
+
+    pub fn load_demo(&mut self) {
+        let snap = crate::demo::snapshot();
+        let mut details = crate::demo::details(&snap);
+        let diffs = crate::demo::diffs(&snap, &mut details);
+        self.demo = true;
+        self.viewer = Some("mira-k".into());
+        self.rate = snap.rate_remaining;
+        self.prs = snap.prs;
+        self.issues = snap.issues;
+        self.details = details;
+        let now = Instant::now();
+        self.diffs = diffs.into_iter().map(|(k, v)| (k, (now, v))).collect();
+        self.last_ok = Some(now);
+        self.loading = false;
+        self.ensure_selection();
     }
 
     pub fn spinner(&self) -> &'static str {
@@ -263,6 +283,9 @@ impl App {
     }
 
     fn spawn_detail(&mut self, item: &Item) {
+        if self.demo {
+            return;
+        }
         if !self.inflight.insert(item.id.clone()) {
             return;
         }
@@ -291,7 +314,8 @@ impl App {
             .diffs
             .get(&item.id)
             .is_none_or(|(t, _)| t.elapsed() > DETAIL_STALE);
-        if self.detail_open
+        if !self.demo
+            && self.detail_open
             && item.kind == gh::Kind::Pr
             && diff_stale
             && self.diff_inflight.insert(item.id.clone())
@@ -585,6 +609,10 @@ impl App {
     }
 
     fn run(&mut self, op: Op) {
+        if self.demo {
+            self.set_status("demo mode: actions are disabled", true);
+            return;
+        }
         let Some(item) = self.selected_item() else {
             return;
         };
@@ -650,7 +678,7 @@ impl App {
                     self.ensure_selection();
                 }
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if !self.demo => {
                 self.loading = true;
                 self.refresh.notify_one();
             }

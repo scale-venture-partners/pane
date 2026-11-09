@@ -12,4 +12,5 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - First-load screen with spinner, sign-in check, query progress, and a clear message when GitHub can't be reached.
 - Label chips in GitHub colors on rows and in details; text filter matches labels.
 - Redesigned PR details: badge row, branch chips, size and check progress bars, Markdown rendering, and a diff view with file summary, line numbers, tinted rows and `]`/`[` file jumping.
+- `--demo` mode with fictional data, and README screenshots generated from it.
 - Configurable orgs, repos, refresh interval and merge method.
