@@ -1,5 +1,8 @@
+#![forbid(unsafe_code)]
+
 mod app;
 mod claude;
+mod cli;
 mod config;
 mod demo;
 mod detail;
@@ -19,35 +22,45 @@ use tokio::sync::{mpsc, Notify};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("pane {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-    if std::env::args().any(|a| a == "--help" || a == "-h") {
-        println!(
-            "pane: live terminal dashboard for open GitHub PRs and issues\n\nconfig: {}\nkeys: press ? inside the app\n--version: print the version\n--demo: run with fictional data, no network or GitHub account needed\n--check: print the URL of every open PR and issue, then exit",
-            config::path().display()
-        );
-        return Ok(());
-    }
-    let demo = std::env::args().any(|a| a == "--demo");
+    let mode = match cli::parse(std::env::args().skip(1)) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "pane: {e}\n\n{}",
+                cli::usage(&config::path().display().to_string())
+            );
+            std::process::exit(2);
+        }
+    };
+    let demo = match mode {
+        cli::Cli::Help => {
+            println!("{}", cli::usage(&config::path().display().to_string()));
+            return Ok(());
+        }
+        cli::Cli::Version => {
+            println!("pane {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        cli::Cli::Check => {
+            let cfg = config::load()?;
+            let snap = gh::fetch_all(&cfg, |_, _| {}).await?;
+            for (kind, i) in snap
+                .prs
+                .iter()
+                .map(|i| ("pr", i))
+                .chain(snap.issues.iter().map(|i| ("issue", i)))
+            {
+                println!("{kind} {}", i.url);
+            }
+            return Ok(());
+        }
+        cli::Cli::Run { demo } => demo,
+    };
     let cfg = if demo {
         config::Config::default()
     } else {
         config::load()?
     };
-    if std::env::args().any(|a| a == "--check") {
-        let snap = gh::fetch_all(&cfg, |_, _| {}).await?;
-        for i in snap
-            .prs
-            .iter()
-            .map(|i| ("pr", i))
-            .chain(snap.issues.iter().map(|i| ("issue", i)))
-        {
-            println!("{} {}", i.0, i.1.url);
-        }
-        return Ok(());
-    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
     let refresh = Arc::new(Notify::new());
 
@@ -106,6 +119,11 @@ async fn main() -> Result<()> {
         app.load_demo();
     }
     let mut terminal = ratatui::init();
+    let panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableMouseCapture);
+        panic_hook(info);
+    }));
     execute!(stdout(), EnableMouseCapture)?;
 
     let result = run(&mut terminal, &mut app, &mut rx).await;

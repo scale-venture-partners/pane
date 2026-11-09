@@ -622,7 +622,7 @@ impl App {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(url) = self.check_url_at(pos) {
-                    open_url(&url);
+                    self.open_link(&url);
                 } else if self.tab_areas[0].contains(pos) {
                     self.switch_tab(Tab::Prs);
                 } else if self.tab_areas[1].contains(pos) {
@@ -832,7 +832,7 @@ impl App {
             }
             KeyCode::Char('o') => {
                 if let Some(i) = self.selected_item() {
-                    open_url(&i.url);
+                    self.open_link(&i.url);
                 }
             }
             KeyCode::Char('y') => {
@@ -895,6 +895,12 @@ impl App {
         }
     }
 
+    fn open_link(&mut self, url: &str) {
+        if let Err(e) = open_url(url) {
+            self.set_status(e, true);
+        }
+    }
+
     fn open_failing_check(&mut self) {
         let Some(id) = self.selected.clone() else {
             return;
@@ -913,24 +919,36 @@ impl App {
                     .find(|c| c.ci == gh::Ci::Pending && c.url.is_some())
             });
         match pick.and_then(|c| c.url.clone()) {
-            Some(u) => open_url(&u),
+            Some(u) => self.open_link(&u),
             None => self.set_status("no failing or pending check with a URL", false),
         }
     }
 }
 
-fn open_url(url: &str) {
+/// Only web links are opened: check and PR URLs come from GitHub's API and must not be able
+/// to launch other URL schemes through the system opener.
+pub fn is_web_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+fn open_url(url: &str) -> Result<(), String> {
+    if !is_web_url(url) {
+        return Err(format!("refusing to open a non-web link: {url}"));
+    }
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
         "xdg-open"
     };
-    let _ = Command::new(opener)
-        .arg(url)
+    Command::new(opener)
+        .arg(url.trim())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open the link with {opener}: {e}"))
 }
 
 const CLIPBOARDS: &[(&str, &[&str])] = &[
@@ -1446,5 +1464,22 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some("a1"));
         press(&mut app, KeyCode::Home);
         assert_eq!(app.selected.as_deref(), Some("b3"));
+    }
+
+    #[test]
+    fn only_web_urls_are_opened() {
+        assert!(is_web_url("https://example.com/x"));
+        assert!(is_web_url("  HTTP://example.com"));
+        for bad in [
+            "file:///etc/passwd",
+            "ssh://host",
+            "slack://open",
+            "javascript:alert(1)",
+            "",
+            "example.com",
+        ] {
+            assert!(!is_web_url(bad), "{bad}");
+            assert!(open_url(bad).is_err(), "{bad}");
+        }
     }
 }

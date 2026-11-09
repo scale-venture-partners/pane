@@ -4,15 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+First public version.
+
 ### Added
-- Live PR and issue dashboard with detail pane, filter, and mouse support.
-- Actions: open, copy URL, comment, approve, merge, close, toggle draft.
-- Clickable checks and a scrollable diff at the bottom of PR details.
-- Items that merge or close stay visible, marked `MERGED` or `CLOSED`, until you navigate away.
-- First-load screen with spinner, sign-in check, query progress, and a clear message when GitHub can't be reached.
-- Label chips in GitHub colors on rows and in details; text filter matches labels.
-- Redesigned PR details: badge row, branch chips, size and check progress bars, Markdown rendering, and a diff view with file summary, line numbers, tinted rows and `]`/`[` file jumping.
-- `--demo` mode with fictional data, and README screenshots generated from it.
-- Claude action: press `r` (repair) on a PR to run `claude -p` in the background in the local clone, in an isolated worktree, with an editable default prompt and logs.
-- The Claude run for a PR (at most one at a time) shows at the top of that PR's details: progress, Claude's reply, the log path and any leftover worktree. Default permission mode is `auto`.
-- Configurable orgs, repos, refresh interval and merge method.
+- Live dashboard of open PRs and issues, grouped by repo, refreshed in the background, with a first-load screen that shows sign-in and query progress.
+- Per-item signals: CI state, review state, draft, label chips in GitHub's colors, and a marker for items that changed since you last looked.
+- PR details: badges, branch, size and check progress bars, reviews, clickable checks, Markdown descriptions and comments, and a diff with a file summary, line numbers, tinted rows and `]`/`[` file jumping.
+- Issue details with Markdown rendering and comments.
+- Actions: open in browser, copy URL, comment, approve, merge, close, toggle draft. Writes ask for confirmation.
+- Merged or closed items stay on screen, marked, until you navigate away.
+- Repair action (`r`): runs `claude -p` in the background in your local clone, in an isolated git worktree, with an editable default prompt. The run's progress, reply, log path and any leftover worktree show in the PR's details. At most one run per PR.
+- Text filter (matches labels too), an "only mine" filter, mouse support.
+- `--demo` mode with fictional data, and `--check` to list what would be shown.
+- Optional config file for orgs, repos, refresh interval, merge method and the repair action.

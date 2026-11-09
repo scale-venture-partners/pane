@@ -1,5 +1,16 @@
 # Security policy
 
-pane runs the `gh` CLI with your existing authentication and does not store or transmit tokens itself.
+pane runs the `gh` CLI with your existing authentication and does not store or transmit tokens itself. It makes no network requests other than through `gh`, and has no telemetry.
 
-If you find a vulnerability, please report it privately through GitHub's "Report a vulnerability" button on the Security tab of this repository rather than a public issue. Expect an initial reply within a week.
+## Supported versions
+
+Only the latest release receives security fixes.
+
+## Reporting a vulnerability
+
+Please report vulnerabilities privately through GitHub's "Report a vulnerability" button on the Security tab of this repository, not in a public issue. Expect an initial reply within a week.
+
+## Scope notes
+
+- The repair action (`r`) runs `claude -p` with `--permission-mode auto` by default, on pull requests whose text and code may be written by someone else. Prompt injection through that content is a known risk of the feature; see "Security and privacy" in the README. Reports of ways to make pane itself pass untrusted content as instructions, or escape its worktree isolation, are in scope.
+- Links from GitHub data are opened only when they are `http://` or `https://`.
