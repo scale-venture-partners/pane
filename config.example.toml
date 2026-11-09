@@ -14,7 +14,7 @@ repos = ["octocat/hello-world"]
 
 # With both lists empty, pane shows items that involve you.
 
-# The Claude action (press C on a PR). The prompt can be edited before each run.
+# The Claude action (press r on a PR). The prompt can be edited before each run.
 claude_prompt = "Rebase this PR on its base branch and fix any failing checks."
 
 # Extra arguments passed to `claude`.

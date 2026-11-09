@@ -51,7 +51,7 @@ Works on macOS and Linux. Label colors use truecolor when `COLORTERM` says so an
 
 ## Usage
 
-With no config, pane shows open PRs and issues that involve you, plus PRs awaiting your review. Press `?` for all keys.
+With no config, pane shows open PRs and issues that involve you, plus PRs awaiting your review. Press `?` for all keys. Every command is a single letter, and upper case does the same as lower case.
 
 | Key | Action |
 | --- | --- |
@@ -59,15 +59,15 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | `Enter` `l` / `Esc` `h` | open / close details |
 | `Tab` `1` `2` | switch PRs and issues |
 | `/` | filter by text |
-| `m` | only my items |
-| `r` | refresh now |
+| `i` | only my items |
+| `u` `F5` | update now |
 | `o` `y` | open in browser, copy URL |
 | `f` | open the first failing check |
 | `d` | jump to the diff (PR details) |
 | `]` `[` | next / previous file in the diff |
-| `a` `M` `x` `D` | approve, merge, close, toggle draft (each confirms) |
+| `a` `m` `x` `w` | approve, merge, close, toggle draft (each confirms) |
 | `c` | comment |
-| `C` | run Claude on the PR (edit the prompt, Enter to run) |
+| `r` | repair: run Claude on the PR (edit the prompt, Enter to run) |
 | `t` | list Claude runs |
 | `q` | quit |
 
@@ -92,9 +92,9 @@ When both `orgs` and `repos` are empty, pane shows items that involve you.
 
 `pane --check` prints the URL of every item pane would show, then exits. Handy for verifying a config.
 
-## Running Claude on a PR
+## Repairing a PR with Claude
 
-Press `C` on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background; the PR row shows a spinner and the header counts running jobs. `t` lists runs with their log paths, and a status message appears when one finishes.
+Press `r` (repair) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background; the PR row shows a spinner and the header counts running jobs. `t` lists runs with their log paths, and a status message appears when one finishes.
 
 - **Your Claude setup:** the job inherits your environment and runs `claude` exactly as you would, so your global settings, credentials, hooks and permission rules apply. Anything `claude -p` can't do under those rules (for example run `git push`) fails the same way it would for you; allow it in your Claude settings or pass flags with `claude_args`.
 - **Where it runs:** in your local clone of the repo, found by matching `origin` against the PR's repository under `repo_roots`.

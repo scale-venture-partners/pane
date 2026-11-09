@@ -775,7 +775,12 @@ impl App {
     fn on_key_normal(&mut self, k: KeyEvent) {
         let is_pr = self.tab == Tab::Prs;
         let page = (self.list_area.height as isize).max(4) - 2;
-        match k.code {
+        // Commands are case-insensitive so Caps Lock or Shift never changes what a key does.
+        let code = match k.code {
+            KeyCode::Char(c) if c.is_ascii_alphabetic() => KeyCode::Char(c.to_ascii_lowercase()),
+            other => other,
+        };
+        match code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Tab | KeyCode::BackTab => {
@@ -785,8 +790,8 @@ impl App {
             KeyCode::Char('2') => self.switch_tab(Tab::Issues),
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.move_selection(isize::MIN / 2),
-            KeyCode::Char('G') | KeyCode::End => self.move_selection(isize::MAX / 2),
+            KeyCode::Home => self.move_selection(isize::MIN / 2),
+            KeyCode::End => self.move_selection(isize::MAX / 2),
             KeyCode::PageDown | KeyCode::Char(' ') => {
                 if self.detail_open {
                     self.detail_scroll = self.detail_scroll.saturating_add(10);
@@ -810,14 +815,18 @@ impl App {
                     self.ensure_selection();
                 }
             }
-            KeyCode::Char('r') if !self.demo => {
+            KeyCode::Char('u') | KeyCode::F(5) if !self.demo => {
                 self.loading = true;
                 self.refresh.notify_one();
             }
             KeyCode::Char('/') => self.mode = Mode::Filter,
-            KeyCode::Char('m') => {
-                self.mine = !self.mine;
-                self.ensure_selection();
+            KeyCode::Char('i') => {
+                if self.viewer.is_none() && !self.mine {
+                    self.set_status("still looking up your GitHub login", true);
+                } else {
+                    self.mine = !self.mine;
+                    self.ensure_selection();
+                }
             }
             KeyCode::Char('o') => {
                 if let Some(i) = self.selected_item() {
@@ -857,7 +866,7 @@ impl App {
                     self.mode = Mode::Comment;
                 }
             }
-            KeyCode::Char('C') if is_pr => {
+            KeyCode::Char('r') if is_pr => {
                 if self.demo {
                     self.set_status("demo mode: Claude is disabled", true);
                 } else if self.ghost_selected() {
@@ -870,11 +879,11 @@ impl App {
             KeyCode::Char('t') => self.mode = Mode::Runs,
             KeyCode::Char('x') => self.confirm(Op::Close),
             KeyCode::Char('a') if is_pr => self.confirm(Op::Approve),
-            KeyCode::Char('M') if is_pr => {
+            KeyCode::Char('m') if is_pr => {
                 let m = self.cfg.merge_method.clone();
                 self.confirm(Op::Merge(m))
             }
-            KeyCode::Char('D') if is_pr => {
+            KeyCode::Char('w') if is_pr => {
                 let op = match self.selected_item() {
                     Some(i) if i.draft => Op::Ready,
                     _ => Op::Draft,
@@ -1061,11 +1070,11 @@ mod tests {
         let mut app = loaded_app();
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(app.selected.as_deref(), Some("a2"));
-        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::End);
         assert_eq!(app.selected.as_deref(), Some("a1"));
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(app.selected.as_deref(), Some("a1"));
-        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Home);
         assert_eq!(app.selected.as_deref(), Some("b3"));
     }
 
@@ -1089,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn writes_require_confirmation() {
         let mut app = loaded_app();
-        press(&mut app, KeyCode::Char('M'));
+        press(&mut app, KeyCode::Char('m'));
         assert!(matches!(app.mode, Mode::Confirm(Op::Merge(_))));
         press(&mut app, KeyCode::Char('n'));
         assert!(matches!(app.mode, Mode::Normal));
@@ -1192,7 +1201,7 @@ mod tests {
             issues: vec![],
             rate_remaining: None,
         })));
-        press(&mut app, KeyCode::Char('M'));
+        press(&mut app, KeyCode::Char('m'));
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.status.as_ref().is_some_and(|s| s.error));
     }
@@ -1219,7 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn claude_key_prefills_prompt_and_esc_cancels() {
         let mut app = loaded_app();
-        press(&mut app, KeyCode::Char('C'));
+        press(&mut app, KeyCode::Char('r'));
         assert!(matches!(app.mode, Mode::Claude));
         assert_eq!(app.input, Config::default().claude_prompt);
         press(&mut app, KeyCode::Esc);
@@ -1230,7 +1239,7 @@ mod tests {
     #[tokio::test]
     async fn claude_prompt_is_editable() {
         let mut app = loaded_app();
-        press(&mut app, KeyCode::Char('C'));
+        press(&mut app, KeyCode::Char('r'));
         for _ in 0..app.input.len() {
             press(&mut app, KeyCode::Backspace);
         }
@@ -1243,12 +1252,12 @@ mod tests {
     async fn claude_is_pr_only_and_blocked_in_demo_and_on_ghosts() {
         let mut app = loaded_app();
         press(&mut app, KeyCode::Char('2'));
-        press(&mut app, KeyCode::Char('C'));
+        press(&mut app, KeyCode::Char('r'));
         assert!(matches!(app.mode, Mode::Normal));
 
         let mut app = loaded_app();
         app.demo = true;
-        press(&mut app, KeyCode::Char('C'));
+        press(&mut app, KeyCode::Char('r'));
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.status.as_ref().is_some_and(|s| s.error));
 
@@ -1259,7 +1268,7 @@ mod tests {
             rate_remaining: None,
         })));
         assert!(app.ghost_selected());
-        press(&mut app, KeyCode::Char('C'));
+        press(&mut app, KeyCode::Char('r'));
         assert!(matches!(app.mode, Mode::Normal));
     }
 
@@ -1329,5 +1338,53 @@ mod tests {
             .status
             .as_ref()
             .is_some_and(|s| s.error && s.text.contains("exited 2") && s.text.contains("/tmp/wt")));
+    }
+
+    #[tokio::test]
+    async fn commands_are_case_insensitive() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('J'));
+        assert_eq!(app.selected.as_deref(), Some("a2"));
+        press(&mut app, KeyCode::Char('R'));
+        assert!(matches!(app.mode, Mode::Claude));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('M'));
+        assert!(matches!(app.mode, Mode::Confirm(Op::Merge(_))));
+    }
+
+    #[tokio::test]
+    async fn text_entry_stays_case_sensitive() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('A'));
+        assert_eq!(app.filter, "A");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('Q'));
+        assert_eq!(app.input, "Q");
+    }
+
+    #[tokio::test]
+    async fn every_command_key_has_one_meaning() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::Char('i'));
+        assert!(!app.mine, "no login known yet");
+        app.viewer = Some("will".into());
+        press(&mut app, KeyCode::Char('i'));
+        assert!(app.mine);
+        press(&mut app, KeyCode::Char('w'));
+        assert!(matches!(app.mode, Mode::Confirm(Op::Draft | Op::Ready)));
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('c'));
+        assert!(matches!(app.mode, Mode::Comment));
+    }
+
+    #[tokio::test]
+    async fn home_and_end_jump_to_the_ends() {
+        let mut app = loaded_app();
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.selected.as_deref(), Some("a1"));
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.selected.as_deref(), Some("b3"));
     }
 }

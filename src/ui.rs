@@ -590,10 +590,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     ("enter", "open"),
                     ("o", "browser"),
                     ("/", "filter"),
-                    ("m", "mine"),
+                    ("i", "mine"),
                 ];
                 if app.tab == Tab::Prs {
-                    p.extend([("a", "approve"), ("M", "merge"), ("C", "claude")]);
+                    p.extend([("a", "approve"), ("m", "merge"), ("r", "repair")]);
                 }
                 p.extend([("c", "comment"), ("?", "help")]);
                 Line::from(keys(&p))
@@ -630,7 +630,7 @@ fn draw_runs(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     if lines.is_empty() {
-        lines.push(Line::styled(" no Claude runs yet: press C on a PR", DIM));
+        lines.push(Line::styled(" no Claude runs yet: press r on a PR", DIM));
     }
     let h = (lines.len() as u16 + 2).min(area.height);
     let w = 96.min(area.width);
@@ -655,14 +655,14 @@ fn draw_runs(f: &mut Frame, app: &App, area: Rect) {
 fn draw_help(f: &mut Frame, area: Rect) {
     let rows = [
         ("↑↓ j k", "move selection"),
-        ("g G", "first / last"),
+        ("home end", "first / last"),
         ("enter l →", "open details"),
         ("esc h ←", "close details / clear filter"),
         ("space b", "scroll details (page)"),
         ("tab 1 2", "switch PRs / issues"),
         ("/", "filter by text"),
-        ("m", "only my items"),
-        ("r", "refresh now"),
+        ("i", "only my items"),
+        ("u  F5", "update now"),
         ("o", "open in browser"),
         ("y", "copy URL"),
         ("f", "open first failing check"),
@@ -670,13 +670,14 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("d", "jump to diff (PR details)"),
         ("] [", "next / previous file in diff"),
         ("a", "approve PR (confirm)"),
-        ("M", "merge PR (confirm)"),
-        ("D", "toggle draft (confirm)"),
+        ("m", "merge PR (confirm)"),
+        ("w", "toggle draft (confirm)"),
         ("x", "close (confirm)"),
         ("c", "comment"),
-        ("C", "run claude on the PR (edit prompt first)"),
-        ("t", "list claude runs"),
+        ("r", "repair: run Claude on the PR"),
+        ("t", "list Claude runs"),
         ("q", "quit"),
+        ("", "letters are not case sensitive"),
     ];
     let lines: Vec<Line> = rows
         .iter()
@@ -816,6 +817,8 @@ mod tests {
         app.mode = Mode::Help;
         let out = render(&mut app, 100, 30);
         assert!(out.contains("approve PR"));
+        assert!(out.contains("repair"));
+        assert!(!out.contains("C  "));
     }
 
     fn detail_with_checks() -> crate::gh::Detail {
