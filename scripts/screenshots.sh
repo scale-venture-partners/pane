@@ -34,5 +34,5 @@ shot() {
 shot overview Enter
 shot description Enter PageDown PageDown
 shot diff Enter d "]" "]"
-shot repair j j j j Enter
+shot repair j j j j j j Enter
 shot issues Tab Enter

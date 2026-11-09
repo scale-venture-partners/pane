@@ -8,6 +8,7 @@ First public version.
 
 ### Added
 - Live dashboard of open PRs and issues, grouped by repo, refreshed in the background, with a first-load screen that shows sign-in and query progress.
+- Stacked PRs are nested under the PR they target, with tree connectors.
 - Per-item signals: CI state, review state, draft, label chips in GitHub's colors, and a marker for items that changed since you last looked.
 - PR details: badges, branch, size and check progress bars, reviews, clickable checks, Markdown descriptions and comments, and a diff with a file summary, line numbers, tinted rows and `]`/`[` file jumping.
 - Issue details with Markdown rendering and comments.

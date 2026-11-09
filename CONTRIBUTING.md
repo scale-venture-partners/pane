@@ -32,6 +32,7 @@ CI runs these on Linux and macOS, builds the docs with warnings denied, and runs
 | `src/gh.rs` | everything that talks to GitHub: GraphQL queries, response parsing, write actions |
 | `src/app.rs` | application state and input handling (keys, mouse, modes) |
 | `src/ui.rs` | the list, header, footer and overlays |
+| `src/stack.rs` | nesting of stacked PRs into a tree |
 | `src/detail.rs` | the PR and issue detail view |
 | `src/markdown.rs` | Markdown to styled terminal lines |
 | `src/diff.rs` | unified diff parsing and rendering |

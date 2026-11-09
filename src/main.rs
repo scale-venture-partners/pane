@@ -9,6 +9,7 @@ mod detail;
 mod diff;
 mod gh;
 mod markdown;
+mod stack;
 mod ui;
 
 use anyhow::Result;

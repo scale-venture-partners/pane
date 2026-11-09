@@ -54,7 +54,9 @@ fn item(kind: Kind, s: Spec) -> Item {
         ci: s.ci,
         gone: None,
         labels: s.labels,
-        head: if kind == Kind::Pr {
+        head: if kind == Kind::Pr && s.number == 482 {
+            "mira/upload-rate-limit".to_string()
+        } else if kind == Kind::Pr {
             format!(
                 "{}/change-{}",
                 s.author.split('-').next().unwrap_or("dev"),
@@ -71,10 +73,22 @@ fn item(kind: Kind, s: Spec) -> Item {
     }
 }
 
+/// Makes PR `child` target the head branch of PR `parent`, like a stacked PR.
+fn stack_on(prs: &mut [Item], child: u64, parent: u64) {
+    let head = prs
+        .iter()
+        .find(|p| p.number == parent)
+        .map(|p| p.head.clone())
+        .unwrap_or_default();
+    if let Some(c) = prs.iter_mut().find(|p| p.number == child) {
+        c.base = head;
+    }
+}
+
 pub fn snapshot() -> Snapshot {
     let feature = || label("feature", "0e8a16");
     let bug = || label("bug", "d73a4a");
-    let prs = vec![
+    let mut prs = vec![
         pr(Spec {
             repo: "lumen-api",
             number: 482,
@@ -211,7 +225,43 @@ pub fn snapshot() -> Snapshot {
             ci: Ci::Success,
             labels: vec![label("documentation", "0075ca")],
         }),
+        pr(Spec {
+            repo: "lumen-api",
+            number: 484,
+            title: "Expose remaining quota in a response header",
+            author: "mira-k",
+            minutes_ago: 25,
+            draft: false,
+            review: Some("REVIEW_REQUIRED"),
+            ci: Ci::Pending,
+            labels: vec![feature(), label("api", "1d76db")],
+        }),
+        pr(Spec {
+            repo: "lumen-api",
+            number: 487,
+            title: "Per-plan limit overrides",
+            author: "mira-k",
+            minutes_ago: 40,
+            draft: true,
+            review: None,
+            ci: Ci::None,
+            labels: vec![feature()],
+        }),
+        pr(Spec {
+            repo: "lumen-web",
+            number: 1209,
+            title: "Settings: add a dark-mode toggle",
+            author: "liam-o",
+            minutes_ago: 240,
+            draft: false,
+            review: None,
+            ci: Ci::Success,
+            labels: vec![label("ui", "bfdadc")],
+        }),
     ];
+    stack_on(&mut prs, 484, 482);
+    stack_on(&mut prs, 487, 484);
+    stack_on(&mut prs, 1209, 1207);
     let issues = vec![
         issue(Spec {
             repo: "lumen-api",
@@ -590,16 +640,8 @@ pub fn details(snap: &Snapshot) -> HashMap<String, Detail> {
             } else {
                 format!("{}\n\nSteps to reproduce are in the thread below.", i.title)
             },
-            head: if hero {
-                "mira/upload-rate-limit".into()
-            } else {
-                format!(
-                    "{}/change-{}",
-                    i.author.split('-').next().unwrap_or("dev"),
-                    i.number
-                )
-            },
-            base: "main".into(),
+            head: i.head.clone(),
+            base: i.base.clone(),
             mergeable: "MERGEABLE".into(),
             merge_state: if i.ci == Ci::Failure {
                 "UNSTABLE"
@@ -727,6 +769,16 @@ pub fn diffs(snap: &Snapshot, details: &mut HashMap<String, Detail>) -> HashMap<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_has_stacked_prs() {
+        let snap = snapshot();
+        let by_number = |n: u64| snap.prs.iter().find(|p| p.number == n).unwrap();
+        assert_eq!(by_number(484).base, by_number(482).head);
+        assert_eq!(by_number(487).base, by_number(484).head);
+        assert_eq!(by_number(1209).base, by_number(1207).head);
+        assert_eq!(by_number(482).base, "main");
+    }
 
     #[test]
     fn demo_runs_cover_one_finished_and_one_running() {

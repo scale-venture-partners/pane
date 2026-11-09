@@ -322,14 +322,23 @@ impl App {
             .all(|w| hay.contains(w))
     }
 
-    /// Visible items of the current tab in display order.
-    pub fn visible(&self) -> Vec<&Item> {
+    /// Visible items of the current tab in display order, with stacked PRs nested under their
+    /// base PR. A PR whose base PR is hidden by a filter is shown at the top level.
+    pub fn visible_rows(&self) -> Vec<(&Item, String)> {
         let items = self.items();
-        group_order(items)
+        let shown: Vec<&Item> = group_order(items)
             .into_iter()
             .map(|i| &items[i])
             .filter(|i| self.matches(i))
+            .collect();
+        crate::stack::arrange(&shown)
+            .into_iter()
+            .map(|p| (shown[p.index], p.prefix))
             .collect()
+    }
+
+    pub fn visible(&self) -> Vec<&Item> {
+        self.visible_rows().into_iter().map(|(i, _)| i).collect()
     }
 
     pub fn selected_item(&self) -> Option<Item> {
@@ -1481,5 +1490,65 @@ mod tests {
             assert!(!is_web_url(bad), "{bad}");
             assert!(open_url(bad).is_err(), "{bad}");
         }
+    }
+
+    fn stacked_app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
+        let mut root = item("r", 1, 9);
+        root.head = "root".into();
+        root.base = "main".into();
+        let mut mid = item("r", 2, 8);
+        mid.head = "mid".into();
+        mid.base = "root".into();
+        let mut top = item("r", 3, 7);
+        top.head = "top".into();
+        top.base = "mid".into();
+        let mut lone = item("r", 4, 1);
+        lone.head = "lone".into();
+        lone.base = "main".into();
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![lone, top, root, mid],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        app
+    }
+
+    #[tokio::test]
+    async fn stacked_prs_nest_and_navigation_follows_the_tree() {
+        let mut app = stacked_app();
+        let rows: Vec<(u64, String)> = app
+            .visible_rows()
+            .into_iter()
+            .map(|(i, p)| (i.number, p))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (1, "".to_string()),
+                (2, "└─".to_string()),
+                (3, "  └─".to_string()),
+                (4, "".to_string())
+            ]
+        );
+        assert_eq!(app.selected.as_deref(), Some("r1"));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected.as_deref(), Some("r2"));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected.as_deref(), Some("r3"));
+    }
+
+    #[tokio::test]
+    async fn filtering_out_the_base_pr_promotes_its_children() {
+        let mut app = stacked_app();
+        app.filter = "title 2".into();
+        let rows = app.visible_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "");
+        app.filter = "title".into();
+        app.mine = true;
+        app.viewer = Some("nobody".into());
+        assert!(app.visible_rows().is_empty());
     }
 }

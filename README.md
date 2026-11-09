@@ -11,6 +11,7 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - PRs and issues in two tabs, grouped by repo, most recently active repo first.
 - PR details are laid out as a card: state, review, CI and merge badges, branch chips, a `+/−` size bar, a check progress bar, rendered Markdown descriptions and comments (headings, lists, tasks, code blocks, links), and a diff with a file summary, line-number gutters and tinted added/removed rows.
 - Per PR at a glance: CI state `●`, review state `✓ ✗ ○`, draft `◇`.
+- Stacked PRs are nested: a PR that targets another open PR's branch is shown under that PR with tree connectors (`├─` `└─`), so a stack reads top to bottom. PRs that target anything else, such as `main`, stay at the top level.
 - Labels show as chips in GitHub's own colors, in rows (when there is room) and in details; `/` filtering matches label names.
 - `◆` marks items that changed since you last looked at them.
 - Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom.

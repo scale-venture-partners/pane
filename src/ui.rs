@@ -131,6 +131,7 @@ fn item_line(
     width: usize,
     show_author: bool,
     busy: Option<&'static str>,
+    prefix: &str,
 ) -> Line<'static> {
     let mut spans = vec![if let Some(glyph) = busy {
         Span::styled(glyph, Color::Magenta)
@@ -146,6 +147,9 @@ fn item_line(
         spans.push(Span::raw(" "));
         spans.push(review_span(i));
         spans.push(Span::raw(" "));
+    }
+    if !prefix.is_empty() {
+        spans.push(Span::styled(prefix.to_string(), DIM));
     }
     let num = format!("#{:<5}", i.number);
     let right = if show_author {
@@ -296,7 +300,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let (mut rows, mut ids): (Vec<ListItem>, Vec<Option<String>>) = (vec![], vec![]);
     let mut sel_row = None;
     let mut last_repo = String::new();
-    let visible = app.visible();
+    let tree = app.visible_rows();
+    let visible: Vec<&Item> = tree.iter().map(|(i, _)| *i).collect();
     let mut group_counts: std::collections::HashMap<&str, usize> = Default::default();
     for i in &visible {
         if i.gone.is_none() {
@@ -304,7 +309,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         }
         group_counts.entry(i.repo_full.as_str()).or_default();
     }
-    for i in &visible {
+    for (i, prefix) in &tree {
         if i.repo_full != last_repo {
             last_repo = i.repo_full.clone();
             let head = Line::from(vec![
@@ -322,7 +327,14 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let fresh = app.fresh.contains(&i.id);
         let busy = app.is_busy(&i.id).then(|| app.spinner());
-        rows.push(ListItem::new(item_line(i, fresh, width, show_author, busy)));
+        rows.push(ListItem::new(item_line(
+            i,
+            fresh,
+            width,
+            show_author,
+            busy,
+            prefix,
+        )));
         ids.push(Some(i.id.clone()));
     }
     app.row_ids = ids;
@@ -982,10 +994,10 @@ mod tests {
     fn row_shows_labels_without_exceeding_width() {
         let item = labeled(1, &["bug", "needs-review", "a-very-long-label-name-indeed"]);
         for width in [60usize, 80, 120] {
-            let line = item_line(&item, false, width, true, None);
+            let line = item_line(&item, false, width, true, None, "");
             assert!(line.width() <= width, "width {width}: {}", line.width());
         }
-        let wide = item_line(&item, false, 120, true, None);
+        let wide = item_line(&item, false, 120, true, None, "");
         let text: String = wide.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("bug"));
         assert!(text.contains("Add feature number 1"));
@@ -993,7 +1005,7 @@ mod tests {
 
     #[test]
     fn narrow_rows_skip_labels() {
-        let line = item_line(&labeled(1, &["bug"]), false, 50, true, None);
+        let line = item_line(&labeled(1, &["bug"]), false, 50, true, None, "");
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("bug"));
     }
@@ -1128,5 +1140,52 @@ mod tests {
         app.mode = Mode::Help;
         let out = render(&mut app, 100, 30);
         assert!(!out.contains("list Claude runs"));
+    }
+
+    #[tokio::test]
+    async fn stacked_prs_render_with_tree_connectors() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, Arc::new(tokio::sync::Notify::new()));
+        let mut a = sample(1, "tool", Ci::Success);
+        a.head = "base-work".into();
+        a.base = "main".into();
+        let mut b = sample(2, "tool", Ci::Success);
+        b.head = "mid-work".into();
+        b.base = "base-work".into();
+        let mut c = sample(3, "tool", Ci::Success);
+        c.head = "top-work".into();
+        c.base = "mid-work".into();
+        let mut d = sample(4, "tool", Ci::Success);
+        d.head = "sibling".into();
+        d.base = "base-work".into();
+        app.update(crate::app::Msg::List(Ok(Snapshot {
+            prs: vec![a, b, c, d],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        let out = render(&mut app, 100, 14);
+        assert!(out.contains("├─"), "{out}");
+        assert!(out.contains("│ └─"), "{out}");
+        assert!(out.contains("└─"), "{out}");
+        let line = |n: &str| out.lines().find(|l| l.contains(n)).unwrap().to_string();
+        let col = |l: &str, needle: &str| l.find(needle).unwrap();
+        let (l1, l2, l3) = (line("#1 "), line("#2 "), line("#3 "));
+        assert!(col(&l1, "#1") < col(&l2, "#2"));
+        assert!(col(&l2, "#2") < col(&l3, "#3"));
+    }
+
+    #[test]
+    fn tree_prefix_counts_against_the_row_width() {
+        let item = labeled(1, &["bug", "needs-review"]);
+        for prefix in ["", "└─", "│ └─", "      └─"] {
+            for width in [60usize, 80, 120] {
+                let line = item_line(&item, false, width, true, None, prefix);
+                assert!(
+                    line.width() <= width,
+                    "{prefix:?} at {width}: {}",
+                    line.width()
+                );
+            }
+        }
     }
 }
