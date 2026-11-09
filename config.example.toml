@@ -17,6 +17,10 @@ repos = ["octocat/hello-world"]
 # The Claude action (press r on a PR). The prompt can be edited before each run.
 claude_prompt = "Rebase this PR on its base branch and fix any failing checks."
 
+# Branches other than the default one that PRs may be merged into even without an open PR
+# for that branch (exact names or `prefix*`).
+# allow_merge_into = ["release/*"]
+
 # Prompt for the CodeRabbit action (press t on a PR with open CodeRabbit threads).
 # coderabbit_prompt = "..."
 

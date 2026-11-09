@@ -18,6 +18,7 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - The bottom-right corner shows refresh state: `↻ 12s ago · next in 78s`, a spinner with `refreshing 3/12` while a refresh runs, and `✗ refresh failed · retry in 70s` when GitHub can't be reached. The header shows the error text and how many API calls you have left.
 - Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom.
 - Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears. This takes effect the moment the action succeeds, even though GitHub's search lags a few seconds behind.
+- Merging is guarded against orphaning commits: a PR whose base is not the repo's default branch (or `main`/`master`) can only be merged if an open PR has that base as its head branch, which is the normal case for a stack. If the base's PR was already merged and the stacked PR still targets its old branch, `m` refuses (and the details show `MERGE BLOCKED`) until you retarget it. The check is repeated live against GitHub when you confirm, so a stale list can't get around it.
 - After any action, pane refreshes just that repo (about 3 and 10 seconds later) instead of waiting for the next full refresh; the footer shows the repo's name while it does.
 - Basic actions without leaving the terminal: open in browser, copy URL, comment, approve, merge, close, toggle draft. Anything that writes asks `y/N` first.
 - Filter by text, show only your own items, full mouse support.
@@ -94,6 +95,7 @@ Optional file at `~/.config/pane/config.toml` (or `$XDG_CONFIG_HOME/pane/config.
 | `orgs` | `[]` | show every open item in these orgs |
 | `repos` | `[]` | extra `owner/name` repos to show |
 | `claude_prompt` | `"Rebase this PR on its base branch and fix any failing checks."` | default prompt for the Claude action |
+| `allow_merge_into` | `[]` | branches (exact, or `prefix*`) PRs may be merged into without an open PR for them, e.g. `release/*` |
 | `coderabbit_prompt` | read, fix or answer, and resolve the threads | prompt for the CodeRabbit action |
 | `claude_args` | `["--permission-mode", "auto"]` | extra arguments for `claude` |
 | `claude_worktree` | `true` | run Claude in its own git worktree |

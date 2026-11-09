@@ -97,7 +97,7 @@ fn check_counts(d: &Detail) -> (usize, usize, usize) {
     (count(Ci::Success), count(Ci::Failure), count(Ci::Pending))
 }
 
-fn badges(item: &Item, d: &Detail) -> Line<'static> {
+fn badges(item: &Item, d: &Detail, merge_blocked: bool) -> Line<'static> {
     let mut b = vec![state_badge(item, d)];
     if item.kind == Kind::Pr {
         if let Some(r) = &item.review {
@@ -107,6 +107,9 @@ fn badges(item: &Item, d: &Detail) -> Line<'static> {
                 _ => Color::Yellow,
             };
             b.push(badge(r.replace('_', " "), c));
+        }
+        if merge_blocked {
+            b.push(badge("MERGE BLOCKED".into(), Color::Red));
         }
         if let Some(r) = item.rabbit.filter(|r| r.unresolved > 0) {
             b.push(badge(format!("CodeRabbit {} open", r.unresolved), RABBIT));
@@ -319,6 +322,7 @@ pub fn build(
     diff_err: Option<&str>,
     width: usize,
     claude: Option<(&ClaudeRun, &str)>,
+    merge_block: Option<&str>,
 ) -> DetailView {
     let mut t: Vec<Line<'static>> = vec![];
     let mut check_lines = vec![];
@@ -327,7 +331,10 @@ pub fn build(
 
     t.push(Line::styled(item.title.clone(), Style::new().bold()));
     t.push(Line::raw(""));
-    t.push(badges(item, d));
+    t.push(badges(item, d, merge_block.is_some()));
+    if let Some(reason) = merge_block {
+        t.push(Line::styled(reason.to_string(), Color::Red));
+    }
     t.push(Line::raw(""));
     if let Some((run, spinner)) = claude {
         t.extend(claude_section(run, spinner, width));

@@ -56,6 +56,7 @@ fn item(kind: Kind, s: Spec) -> Item {
         ci: s.ci,
         gone: None,
         labels: s.labels,
+        default_branch: "main".into(),
         rabbit: None,
         head: if kind == Kind::Pr && s.number == 482 {
             "mira/upload-rate-limit".to_string()
@@ -378,6 +379,21 @@ pub fn snapshot() -> Snapshot {
     set_rabbit(&mut prs, 482, 3, 5);
     set_rabbit(&mut prs, 479, 0, 2);
     set_rabbit(&mut prs, 1198, 1, 2);
+    prs.push(pr(Spec {
+        repo: "harbor",
+        number: 99,
+        title: "Follow-up: document the multi-arch flags",
+        author: "mira-k",
+        minutes_ago: 60 * 30,
+        draft: false,
+        review: Some("APPROVED"),
+        ci: Ci::Success,
+        labels: vec![label("documentation", "0075ca")],
+    }));
+    if let Some(p) = prs.iter_mut().find(|p| p.number == 99) {
+        // Stacked on a branch whose PR was already merged: merging here would orphan it.
+        p.base = "mira/multi-arch-v1".into();
+    }
     stack_on(&mut prs, 484, 482);
     stack_on(&mut prs, 487, 484);
     stack_on(&mut prs, 1209, 1207);
@@ -913,6 +929,19 @@ mod tests {
             }
         }
         assert_eq!(found, 3);
+    }
+
+    #[test]
+    fn demo_includes_one_merge_blocked_pr() {
+        let snap = snapshot();
+        let heads: Vec<&str> = snap.prs.iter().map(|p| p.head.as_str()).collect();
+        let blocked: Vec<u64> = snap
+            .prs
+            .iter()
+            .filter(|p| p.base != "main" && !heads.contains(&p.base.as_str()))
+            .map(|p| p.number)
+            .collect();
+        assert_eq!(blocked, [99]);
     }
 
     #[test]
