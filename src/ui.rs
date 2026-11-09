@@ -1,5 +1,6 @@
 use crate::app::{App, Mode, Tab};
-use crate::gh::{Ci, Detail, Item, Kind, Label};
+use crate::detail::{self, DetailView};
+use crate::gh::{Ci, Item, Kind, Label};
 use chrono::Utc;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -7,7 +8,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-const DIM: Color = Color::Indexed(245);
+pub(crate) const DIM: Color = Color::Indexed(245);
 const SEL_BG: Color = Color::Indexed(238);
 const WIDE_MIN: u16 = 110;
 const LABEL_MAX: usize = 16;
@@ -23,7 +24,7 @@ pub fn age(item_time: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> Stri
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -32,7 +33,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-fn ci_span(ci: Ci) -> Span<'static> {
+pub(crate) fn ci_span(ci: Ci) -> Span<'static> {
     match ci {
         Ci::Success => Span::styled("●", Color::Green),
         Ci::Failure => Span::styled("●", Color::Red),
@@ -53,7 +54,7 @@ fn review_span(i: &Item) -> Span<'static> {
     }
 }
 
-fn gone_color(state: &str) -> Color {
+pub(crate) fn gone_color(state: &str) -> Color {
     match state {
         "MERGED" => Color::Magenta,
         "CLOSED" => Color::Red,
@@ -77,7 +78,7 @@ pub fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
     16 + 36 * level(r) + 6 * level(g) + level(b)
 }
 
-fn rgb_color((r, g, b): (u8, u8, u8)) -> Color {
+pub(crate) fn rgb_color((r, g, b): (u8, u8, u8)) -> Color {
     if truecolor() {
         Color::Rgb(r, g, b)
     } else {
@@ -99,7 +100,7 @@ fn chip_text(l: &Label, max: usize) -> String {
     format!(" {} ", truncate(&l.name, max))
 }
 
-fn chip(l: &Label, max: usize) -> Span<'static> {
+pub(crate) fn chip(l: &Label, max: usize) -> Span<'static> {
     Span::styled(
         chip_text(l, max),
         Style::new().fg(label_fg(l.rgb)).bg(rgb_color(l.rgb)),
@@ -409,255 +410,8 @@ fn draw_loading(f: &mut Frame, app: &App, area: Rect, block: Block<'_>) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rect);
 }
 
-fn badge(text: String, color: Color) -> Span<'static> {
+pub(crate) fn badge(text: String, color: Color) -> Span<'static> {
     Span::styled(format!(" {text} "), Style::new().fg(Color::Black).bg(color))
-}
-
-fn clean_body(body: &str) -> String {
-    let mut out = String::new();
-    let mut rest = body.replace('\r', "");
-    while let Some(s) = rest.find("<!--") {
-        out.push_str(&rest[..s]);
-        match rest[s..].find("-->") {
-            Some(e) => rest = rest[s + e + 3..].to_string(),
-            None => {
-                rest.clear();
-                break;
-            }
-        }
-    }
-    out.push_str(&rest);
-    out.trim().to_string()
-}
-
-fn body_lines(body: &str) -> Vec<Line<'static>> {
-    let mut in_code = false;
-    clean_body(body)
-        .lines()
-        .map(|l| {
-            if l.trim_start().starts_with("```") {
-                in_code = !in_code;
-                return Line::styled(l.to_string(), DIM);
-            }
-            if in_code {
-                Line::styled(l.to_string(), DIM)
-            } else if l.starts_with('#') {
-                Line::styled(
-                    l.trim_start_matches('#').trim().to_string(),
-                    Style::new().bold(),
-                )
-            } else {
-                Line::raw(l.to_string())
-            }
-        })
-        .collect()
-}
-
-fn section(title: &str) -> Line<'static> {
-    Line::styled(title.to_string(), Style::new().bold().fg(Color::Cyan))
-}
-
-struct DetailView {
-    text: Text<'static>,
-    check_lines: Vec<(usize, String)>,
-    diff_line: Option<usize>,
-}
-
-pub fn diff_lines(diff: &str) -> Vec<Line<'static>> {
-    diff.lines()
-        .map(|l| {
-            let style = if l.starts_with("diff --git") {
-                Style::new().bold().fg(Color::Yellow)
-            } else if l.starts_with("+++") || l.starts_with("---") || l.starts_with("index ") {
-                Style::new().fg(DIM)
-            } else if l.starts_with("@@") {
-                Style::new().fg(Color::Cyan)
-            } else if l.starts_with('+') {
-                Style::new().fg(Color::Green)
-            } else if l.starts_with('-') {
-                Style::new().fg(Color::Red)
-            } else {
-                Style::new()
-            };
-            Line::styled(l.to_string(), style)
-        })
-        .collect()
-}
-
-fn detail_text(item: &Item, d: &Detail, diff: Option<&str>, diff_err: Option<&str>) -> DetailView {
-    let mut check_lines = vec![];
-    let mut diff_line = None;
-    let mut t: Vec<Line> = vec![
-        Line::styled(item.title.clone(), Style::new().bold()),
-        Line::raw(""),
-    ];
-
-    let mut meta = vec![Span::styled(format!("@{}", item.author), Color::Blue)];
-    meta.push(Span::styled(
-        match age(item.updated_at, Utc::now()).as_str() {
-            "now" => " · updated just now".to_string(),
-            a => format!(" · updated {a} ago"),
-        },
-        DIM,
-    ));
-    t.push(Line::from(meta));
-
-    if let Some(state) = &item.gone {
-        t.push(Line::raw(""));
-        t.push(Line::from(badge(state.clone(), gone_color(state))));
-    }
-
-    if item.kind == Kind::Pr {
-        t.push(Line::from(vec![
-            Span::styled(format!("{} → {}", d.head, d.base), Color::Cyan),
-            Span::styled(format!("  +{}", d.additions), Color::Green),
-            Span::styled(format!(" −{}", d.deletions), Color::Red),
-            Span::styled(format!("  {} files", d.files), DIM),
-        ]));
-        let mut badges = vec![];
-        if item.draft {
-            badges.push(badge("DRAFT".into(), Color::Indexed(245)));
-        }
-        if let Some(r) = &item.review {
-            let c = match r.as_str() {
-                "APPROVED" => Color::Green,
-                "CHANGES_REQUESTED" => Color::Red,
-                _ => Color::Yellow,
-            };
-            badges.push(badge(r.replace('_', " "), c));
-        }
-        let (mc, ml) = match d.mergeable.as_str() {
-            "MERGEABLE" => (Color::Green, "MERGEABLE".to_string()),
-            "CONFLICTING" => (Color::Red, "CONFLICTS".to_string()),
-            _ => (Color::Yellow, "MERGE UNKNOWN".to_string()),
-        };
-        if item.gone.is_none() {
-            badges.push(badge(ml, mc));
-            if !d.merge_state.is_empty() && d.merge_state != "CLEAN" && d.merge_state != "UNKNOWN" {
-                badges.push(badge(d.merge_state.clone(), Color::Yellow));
-            }
-        }
-        let mut line = vec![];
-        for b in badges {
-            line.push(b);
-            line.push(Span::raw(" "));
-        }
-        t.push(Line::raw(""));
-        t.push(Line::from(line));
-    }
-
-    if !d.labels.is_empty() {
-        let mut spans = vec![Span::styled("labels  ", DIM)];
-        for l in &d.labels {
-            spans.push(chip(l, 40));
-            spans.push(Span::raw(" "));
-        }
-        t.push(Line::from(spans));
-    }
-    if !d.assignees.is_empty() {
-        t.push(Line::from(vec![
-            Span::styled("assigned  ", DIM),
-            Span::raw(d.assignees.join(", ")),
-        ]));
-    }
-
-    if item.kind == Kind::Pr {
-        if !d.requested.is_empty() || !d.reviews.is_empty() {
-            t.push(Line::raw(""));
-            t.push(section("Reviews"));
-            for (who, state) in &d.reviews {
-                let (sym, c) = match state.as_str() {
-                    "APPROVED" => ("✓", Color::Green),
-                    "CHANGES_REQUESTED" => ("✗", Color::Red),
-                    _ => ("•", DIM),
-                };
-                t.push(Line::from(vec![
-                    Span::styled(format!("{sym} "), c),
-                    Span::raw(format!("{who} ")),
-                    Span::styled(state.to_lowercase().replace('_', " "), DIM),
-                ]));
-            }
-            for who in &d.requested {
-                t.push(Line::from(vec![
-                    Span::styled("○ ", Color::Yellow),
-                    Span::raw(format!("{who} ")),
-                    Span::styled("requested", DIM),
-                ]));
-            }
-        }
-
-        t.push(Line::raw(""));
-        let passing = d.checks.iter().filter(|c| c.ci == Ci::Success).count();
-        t.push(section(&format!(
-            "Checks  {passing}/{} passing",
-            d.checks.len()
-        )));
-        if d.checks.is_empty() {
-            t.push(Line::styled("no checks reported", DIM));
-        }
-        let mut checks: Vec<_> = d.checks.iter().collect();
-        checks.sort_by_key(|c| match c.ci {
-            Ci::Failure => 0,
-            Ci::Pending => 1,
-            _ => 2,
-        });
-        for c in checks {
-            let name_style = match c.url {
-                Some(_) => Style::new().underlined(),
-                None => Style::new(),
-            };
-            if let Some(u) = &c.url {
-                check_lines.push((t.len(), u.clone()));
-            }
-            t.push(Line::from(vec![
-                ci_span(c.ci),
-                Span::styled(format!(" {}", c.name), name_style),
-            ]));
-        }
-    }
-
-    t.push(Line::raw(""));
-    t.push(section("Description"));
-    let body = body_lines(&d.body);
-    if body.is_empty() {
-        t.push(Line::styled("no description", DIM));
-    }
-    t.extend(body);
-
-    if !d.comments.is_empty() {
-        t.push(Line::raw(""));
-        t.push(section("Recent comments"));
-        for c in &d.comments {
-            t.push(Line::raw(""));
-            t.push(Line::from(vec![
-                Span::styled(format!("@{}", c.author), Color::Blue),
-                Span::styled(format!("  {}", c.created_at.get(..10).unwrap_or("")), DIM),
-            ]));
-            t.extend(body_lines(&c.body));
-        }
-    }
-    if item.kind == Kind::Pr {
-        t.push(Line::raw(""));
-        diff_line = Some(t.len());
-        t.push(section(&format!(
-            "Diff  +{} −{} · {} files",
-            d.additions, d.deletions, d.files
-        )));
-        match (diff, diff_err) {
-            (Some(""), _) => t.push(Line::styled("empty diff", DIM)),
-            (Some(text), _) => t.extend(diff_lines(text)),
-            (None, Some(e)) => t.push(Line::styled(
-                format!("failed to load diff: {e}"),
-                Color::Red,
-            )),
-            (None, None) => t.push(Line::styled("loading diff…", Color::Yellow)),
-        }
-    }
-    DetailView {
-        text: Text::from(t),
-        check_lines,
-        diff_line,
-    }
 }
 
 fn rows_before(lines: &[Line<'static>], upto: usize, width: u16) -> u16 {
@@ -688,31 +442,41 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     let view = if let Some(d) = app.details.get(&item.id) {
         let diff = app.diffs.get(&item.id).map(|(_, t)| t.as_str());
         let err = app.diff_err.get(&item.id).map(String::as_str);
-        detail_text(&item, d, diff, err)
+        detail::build(&item, d, diff, err, inner.width as usize)
     } else if let Some(e) = app.detail_err.get(&item.id) {
-        DetailView {
-            text: Text::from(vec![Line::styled(
-                format!("failed to load: {e}"),
-                Color::Red,
-            )]),
-            check_lines: vec![],
-            diff_line: None,
-        }
+        DetailView::plain(Text::from(vec![Line::styled(
+            format!("failed to load: {e}"),
+            Color::Red,
+        )]))
     } else {
-        DetailView {
-            text: Text::styled(format!("{} loading…", app.spinner()), DIM),
-            check_lines: vec![],
-            diff_line: None,
-        }
+        DetailView::plain(Text::styled(format!("{} loading…", app.spinner()), DIM))
     };
 
-    let total = Paragraph::new(view.text.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(inner.width) as u16;
+    // Everything before the diff may wrap; diff rows are pre-fitted to one row each, so
+    // offsets inside it are plain line arithmetic rather than a wrap pass over thousands of lines.
+    let lines = &view.text.lines;
+    let (total, diff_row) = match view.diff_line {
+        Some(dl) => {
+            let before = rows_before(lines, dl, inner.width);
+            (before + (lines.len() - dl) as u16, before)
+        }
+        None => (
+            Paragraph::new(view.text.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width) as u16,
+            0,
+        ),
+    };
     app.detail_scroll = app.detail_scroll.min(total.saturating_sub(inner.height));
-    app.diff_row = view
-        .diff_line
-        .map_or(0, |l| rows_before(&view.text.lines, l, inner.width));
+    app.diff_row = diff_row;
+    app.file_rows = match view.diff_line {
+        Some(dl) => view
+            .file_lines
+            .iter()
+            .map(|l| diff_row + (*l - dl) as u16)
+            .collect(),
+        None => vec![],
+    };
 
     for (line, url) in &view.check_lines {
         let row = rows_before(&view.text.lines, *line, inner.width);
@@ -820,6 +584,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("f", "open first failing check"),
         ("click", "a check to open it"),
         ("d", "jump to diff (PR details)"),
+        ("] [", "next / previous file in diff"),
         ("a", "approve PR (confirm)"),
         ("M", "merge PR (confirm)"),
         ("D", "toggle draft (confirm)"),
@@ -948,12 +713,6 @@ mod tests {
         assert_eq!(truncate("abc", 4), "abc");
     }
 
-    #[test]
-    fn body_comments_are_stripped() {
-        assert_eq!(clean_body("a <!-- hidden --> b\r\n"), "a  b");
-        assert_eq!(clean_body("x <!-- never closed"), "x");
-    }
-
     #[tokio::test]
     async fn wide_layout_shows_list_and_detail() {
         let mut app = app_with_items();
@@ -975,6 +734,7 @@ mod tests {
         use crate::gh::{Check, Detail};
         Detail {
             state: "OPEN".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
             body: "hello".into(),
             head: "feature".into(),
             base: "main".into(),
@@ -1009,6 +769,15 @@ mod tests {
         }
     }
 
+    fn sample_diff(adds: usize) -> String {
+        let mut d =
+            format!("diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,0 +1,{adds} @@\n");
+        for n in 0..adds {
+            d.push_str(&format!("+line {n}\n"));
+        }
+        d
+    }
+
     fn app_with_detail(diff: &str) -> App {
         let mut app = app_with_items();
         app.selected = Some("id1".into());
@@ -1019,25 +788,9 @@ mod tests {
         app
     }
 
-    #[test]
-    fn diff_lines_are_colored_by_kind() {
-        let lines = diff_lines("diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n ctx");
-        let colors: Vec<_> = lines.iter().map(|l| l.style.fg).collect();
-        assert_eq!(
-            colors,
-            [
-                Some(Color::Yellow),
-                Some(Color::Cyan),
-                Some(Color::Red),
-                Some(Color::Green),
-                None
-            ]
-        );
-    }
-
     #[tokio::test]
     async fn checks_with_urls_are_clickable() {
-        let mut app = app_with_detail("+x");
+        let mut app = app_with_detail(&sample_diff(1));
         let out = render(&mut app, 130, 40);
         assert!(out.contains("lint"));
         assert_eq!(app.check_hits.len(), 2);
@@ -1054,19 +807,19 @@ mod tests {
 
     #[tokio::test]
     async fn diff_is_at_the_bottom_and_reachable_by_scrolling() {
-        let diff: String = (0..80).map(|n| format!("+line {n}\n")).collect();
+        let diff = sample_diff(80);
         let mut app = app_with_detail(&diff);
         let top = render(&mut app, 130, 30);
-        assert!(!top.contains("+line 79"));
+        assert!(!top.contains("line 79"));
         assert!(app.diff_row > 0);
         app.detail_scroll = u16::MAX;
         let bottom = render(&mut app, 130, 30);
-        assert!(bottom.contains("+line 79"));
+        assert!(bottom.contains("line 79"));
     }
 
     #[tokio::test]
     async fn clicks_follow_scrolling() {
-        let diff: String = (0..80).map(|n| format!("+line {n}\n")).collect();
+        let diff = sample_diff(80);
         let mut app = app_with_detail(&diff);
         render(&mut app, 130, 30);
         assert_eq!(app.check_hits.len(), 2);
@@ -1201,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn detail_shows_label_chips() {
-        let mut app = app_with_detail("+x");
+        let mut app = app_with_detail(&sample_diff(1));
         app.details.get_mut("id1").unwrap().labels = vec![Label {
             name: "needs-review".into(),
             rgb: (1, 2, 3),

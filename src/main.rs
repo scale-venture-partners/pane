@@ -1,6 +1,9 @@
 mod app;
 mod config;
+mod detail;
+mod diff;
 mod gh;
+mod markdown;
 mod ui;
 
 use anyhow::Result;
@@ -105,14 +108,17 @@ async fn run(
     app: &mut App,
     rx: &mut mpsc::UnboundedReceiver<Msg>,
 ) -> Result<()> {
+    let mut dirty = true;
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        if dirty {
+            terminal.draw(|f| ui::draw(f, app))?;
+        }
         let Some(msg) = rx.recv().await else {
             return Ok(());
         };
-        app.update(msg);
+        dirty = app.update(msg);
         while let Ok(m) = rx.try_recv() {
-            app.update(m);
+            dirty |= app.update(m);
         }
         if app.quit {
             return Ok(());

@@ -70,6 +70,7 @@ pub struct App {
     diff_inflight: HashSet<String>,
     pub check_hits: Vec<(Rect, String)>,
     pub diff_row: u16,
+    pub file_rows: Vec<u16>,
     /// The selected item after it left the open list; kept on screen until you move off it.
     pub ghost: Option<Item>,
     pub fresh: HashSet<String>,
@@ -134,6 +135,7 @@ impl App {
             diff_inflight: HashSet::new(),
             check_hits: vec![],
             diff_row: 0,
+            file_rows: vec![],
             ghost: None,
             fresh: HashSet::new(),
             seen: HashMap::new(),
@@ -342,7 +344,9 @@ impl App {
         }
     }
 
-    pub fn update(&mut self, msg: Msg) {
+    /// Returns whether the screen needs redrawing.
+    pub fn update(&mut self, msg: Msg) -> bool {
+        let tick = matches!(msg, Msg::Tick);
         match msg {
             Msg::Term(Event::Key(k)) if k.kind == KeyEventKind::Press => self.on_key(k),
             Msg::Term(Event::Mouse(m)) => self.on_mouse(m),
@@ -405,6 +409,16 @@ impl App {
             }
             Msg::ActionDone(Err(e)) => self.set_status(e, true),
         }
+        !tick || self.tick_needs_redraw()
+    }
+
+    /// Ticks drive the spinner and the "updated Ns ago" label; skip redraws when nothing moves.
+    fn tick_needs_redraw(&self) -> bool {
+        self.last_ok.is_none()
+            || self.loading
+            || !self.inflight.is_empty()
+            || !self.diff_inflight.is_empty()
+            || self.frame.is_multiple_of(10)
     }
 
     fn on_list(&mut self, r: Result<Snapshot, String>) {
@@ -660,6 +674,21 @@ impl App {
             }
             KeyCode::Char('f') => self.open_failing_check(),
             KeyCode::Char('d') if is_pr && self.detail_open => self.detail_scroll = self.diff_row,
+            KeyCode::Char(']') if is_pr && self.detail_open => {
+                if let Some(r) = self.file_rows.iter().find(|r| **r > self.detail_scroll) {
+                    self.detail_scroll = *r;
+                }
+            }
+            KeyCode::Char('[') if is_pr && self.detail_open => {
+                if let Some(r) = self
+                    .file_rows
+                    .iter()
+                    .rev()
+                    .find(|r| **r < self.detail_scroll)
+                {
+                    self.detail_scroll = *r;
+                }
+            }
             KeyCode::Char('c') => {
                 if self.ghost_selected() {
                     self.set_status("no longer open: nothing to do", true);

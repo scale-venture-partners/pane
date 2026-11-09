@@ -6,10 +6,11 @@
 A live terminal dashboard for your open GitHub pull requests and issues. Leave it running in a terminal pane all day; it polls GitHub at a polite rate and keeps the list current.
 
 - PRs and issues in two tabs, grouped by repo, most recently active repo first.
+- PR details are laid out as a card: state, review, CI and merge badges, branch chips, a `+/−` size bar, a check progress bar, rendered Markdown descriptions and comments (headings, lists, tasks, code blocks, links), and a diff with a file summary, line-number gutters and tinted added/removed rows.
 - Per PR at a glance: CI state `●`, review state `✓ ✗ ○`, draft `◇`.
 - Labels show as chips in GitHub's own colors, in rows (when there is room) and in details; `/` filtering matches label names.
 - `◆` marks items that changed since you last looked at them.
-- Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom (`d` jumps to it).
+- Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom.
 - Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears.
 - Basic actions without leaving the terminal: open in browser, copy URL, comment, approve, merge, close, toggle draft. Anything that writes asks `y/N` first.
 - Filter by text, show only your own items, full mouse support.
@@ -42,6 +43,7 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | `o` `y` | open in browser, copy URL |
 | `f` | open the first failing check |
 | `d` | jump to the diff (PR details) |
+| `]` `[` | next / previous file in the diff |
 | `a` `M` `x` `D` | approve, merge, close, toggle draft (each confirms) |
 | `c` | comment |
 | `q` | quit |

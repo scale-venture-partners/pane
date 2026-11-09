@@ -110,6 +110,7 @@ pub struct Comment {
 #[derive(Debug, Clone)]
 pub struct Detail {
     pub state: String,
+    pub created_at: String,
     pub body: String,
     pub head: String,
     pub base: String,
@@ -391,7 +392,7 @@ pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Resu
 
 const PR_DETAIL: &str = r#"
 query($id:ID!){ node(id:$id){ ... on PullRequest{
-  state body headRefName baseRefName mergeable mergeStateStatus additions deletions changedFiles
+  state createdAt body headRefName baseRefName mergeable mergeStateStatus additions deletions changedFiles
   labels(first:20){nodes{name color}}
   assignees(first:10){nodes{login}}
   reviewRequests(first:10){nodes{requestedReviewer{... on User{login} ... on Team{name}}}}
@@ -406,7 +407,7 @@ query($id:ID!){ node(id:$id){ ... on PullRequest{
 
 const ISSUE_DETAIL: &str = r#"
 query($id:ID!){ node(id:$id){ ... on Issue{
-  state body
+  state createdAt body
   labels(first:20){nodes{name color}}
   assignees(first:10){nodes{login}}
   comments(last:5){nodes{author{login} body createdAt}}
@@ -484,6 +485,7 @@ pub async fn fetch_detail(item: &Item) -> Result<Detail> {
 
     Ok(Detail {
         state: text(n, "/state"),
+        created_at: text(n, "/createdAt"),
         body: text(n, "/body"),
         head: text(n, "/headRefName"),
         base: text(n, "/baseRefName"),
