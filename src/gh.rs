@@ -510,7 +510,15 @@ pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Resu
     } else {
         None
     };
-    let scopes = scopes(cfg, login.as_deref());
+    fetch_scopes(&scopes(cfg, login.as_deref()), on_progress).await
+}
+
+/// Everything open in one repo (`owner/name`): used to refresh just that repo after an action.
+pub async fn fetch_repo(repo_full: &str) -> Result<Snapshot> {
+    fetch_scopes(&[format!("repo:{repo_full}")], |_, _| {}).await
+}
+
+async fn fetch_scopes(scopes: &[String], on_progress: impl Fn(usize, usize)) -> Result<Snapshot> {
     let jobs = scopes.iter().flat_map(|s| {
         [
             (Pass::Prs, Kind::Pr, ""),

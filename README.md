@@ -17,7 +17,8 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - `◆` marks items that changed since you last looked at them.
 - The bottom-right corner shows refresh state: `↻ 12s ago · next in 78s`, a spinner with `refreshing 3/12` while a refresh runs, and `✗ refresh failed · retry in 70s` when GitHub can't be reached. The header shows the error text and how many API calls you have left.
 - Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom.
-- Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears.
+- Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears. This takes effect the moment the action succeeds, even though GitHub's search lags a few seconds behind.
+- After any action, pane refreshes just that repo (about 3 and 10 seconds later) instead of waiting for the next full refresh; the footer shows the repo's name while it does.
 - Basic actions without leaving the terminal: open in browser, copy URL, comment, approve, merge, close, toggle draft. Anything that writes asks `y/N` first.
 - Filter by text, show only your own items, full mouse support.
 
@@ -114,6 +115,8 @@ When both `orgs` and `repos` are empty, pane shows items that involve you.
 Two keys start a Claude run on the selected PR: `r` (repair: rebase and fix failing checks) and `t` (work through its open CodeRabbit threads). They differ only in the prompt they start from, and they share the same one-run-per-PR slot described below.
 
 Press `r` (or `t`) on a PR, adjust the prompt if you like, and press Enter. pane runs [`claude -p`](https://docs.claude.com/en/docs/claude-code) in the background and opens the PR's details, where a **Claude** section at the top shows progress while it runs and Claude's reply, the log path and any leftover worktree afterwards. The PR row shows a spinner while it works, and the status bar shows the first line of the reply when it finishes.
+
+When a run ends, pane refreshes that PR's checks, reviews and diff right away and again about 3, 10 and 30 seconds later, because a push usually restarts CI and the new checks take a while to appear.
 
 Each PR has at most one run at a time; starting another after one finishes replaces its result.
 

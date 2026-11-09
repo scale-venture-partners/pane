@@ -685,8 +685,29 @@ fn fit_hints<'a>(pairs: &[(&'a str, &'a str)], budget: usize) -> Vec<(&'a str, &
         .collect()
 }
 
-/// Refresh state for the bottom bar: age of the data, time to the next refresh, or progress.
+/// Refresh state for the bottom bar, plus any repos being refreshed after an action.
 fn refresh_spans(app: &App) -> Vec<Span<'static>> {
+    let mut spans = main_refresh_spans(app);
+    if !app.repo_refreshing.is_empty() && !app.loading {
+        let mut names: Vec<&str> = app
+            .repo_refreshing
+            .iter()
+            .map(|r| r.rsplit('/').next().unwrap_or(r))
+            .collect();
+        names.sort_unstable();
+        spans.insert(
+            0,
+            Span::styled(
+                format!("{} {}   ", app.spinner(), names.join(", ")),
+                Color::Yellow,
+            ),
+        );
+    }
+    spans
+}
+
+/// Age of the data, time to the next refresh, or progress.
+fn main_refresh_spans(app: &App) -> Vec<Span<'static>> {
     if app.demo {
         return vec![Span::styled("demo data · no refresh ", DIM)];
     }
@@ -1159,6 +1180,7 @@ mod tests {
     fn run_for(prompt: &str, state: RunState) -> crate::app::ClaudeRun {
         crate::app::ClaudeRun {
             repo: "tool".into(),
+            repo_full: "o/tool".into(),
             number: 1,
             prompt: prompt.into(),
             started: std::time::Instant::now(),
@@ -1571,5 +1593,19 @@ mod tests {
             "stale details stay visible: {during}"
         );
         assert_eq!(app.detail_scroll, scroll_before, "scroll position is kept");
+    }
+
+    #[tokio::test]
+    async fn footer_names_the_repo_being_refreshed_after_an_action() {
+        let mut app = fetched_app();
+        app.update(crate::app::Msg::RepoRefreshing("o/lumen-api".into()));
+        let line = footer(&mut app, 140);
+        assert!(line.contains("lumen-api"), "{line}");
+        assert!(line.contains("↻"), "the normal timing stays: {line}");
+        app.update(crate::app::Msg::RepoList(
+            "o/lumen-api".into(),
+            Ok(Snapshot::default()),
+        ));
+        assert!(!footer(&mut app, 140).contains("lumen-api"));
     }
 }

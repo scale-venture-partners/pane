@@ -14,6 +14,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 const DETAIL_STALE: Duration = Duration::from_secs(45);
+/// Delays, after an action, at which the affected repo and PR are refreshed.
+const ACTION_REFRESH_AT: &[Duration] = &[Duration::from_secs(3), Duration::from_secs(10)];
+/// After a Claude run: it usually pushed, which restarts CI, and the new checks take a while to
+/// show up, so look again later too.
+const CLAUDE_REFRESH_AT: &[Duration] = &[
+    Duration::from_secs(3),
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+];
 
 /// Messages are short-lived and sent one at a time, so variant size does not matter.
 #[allow(clippy::large_enum_variant)]
@@ -26,7 +35,13 @@ pub enum Msg {
     Viewer(Result<String, String>),
     Detail(String, Result<Detail, String>),
     Diff(String, Result<String, String>),
-    ActionDone(Result<String, String>),
+    /// What an action ran on, and its result.
+    ActionDone(Acted, Result<String, String>),
+    /// A targeted refresh of one repo is about to fetch.
+    RepoRefreshing(String),
+    RepoList(String, Result<Snapshot, String>),
+    /// Re-fetch one item's details (checks, reviews, diff) if it is on screen.
+    RefreshDetail(String),
     ClaudeDone(String, Result<claude::Outcome, String>),
 }
 
@@ -46,6 +61,18 @@ pub enum Mode {
     Help,
 }
 
+/// The target of a finished action.
+#[derive(Debug, Clone)]
+pub struct Acted {
+    pub repo_full: String,
+    pub item_id: String,
+    /// Set when the action ended the item's life: `MERGED` or `CLOSED`.
+    pub ends_as: Option<&'static str>,
+}
+
+/// How long a locally known merge or close is trusted over GitHub's search index.
+const CLOSED_TRUST: Duration = Duration::from_secs(120);
+
 pub enum RunState {
     Running,
     Done(i32),
@@ -55,6 +82,7 @@ pub enum RunState {
 /// The Claude run for one PR. A PR has at most one at a time; a new run replaces the old result.
 pub struct ClaudeRun {
     pub repo: String,
+    pub repo_full: String,
     pub number: u64,
     pub prompt: String,
     pub started: Instant,
@@ -105,6 +133,11 @@ pub struct App {
     pub last_ok: Option<Instant>,
     /// When the most recent fetch began; the next scheduled one is `refresh_secs` later.
     pub last_fetch_started: Option<Instant>,
+    /// Repos with a targeted refresh fetching right now.
+    pub repo_refreshing: HashSet<String>,
+    /// Items merged or closed from here, by id: label, repo and when. GitHub's search index lags
+    /// behind, so these stay out of the list (or ghosted) even if a refresh still returns them.
+    closed: HashMap<String, (String, String, Instant)>,
     pub fetch_error: Option<String>,
     pub loading: bool,
     pub rate: Option<u64>,
@@ -172,6 +205,8 @@ impl App {
             seen: HashMap::new(),
             last_ok: None,
             last_fetch_started: None,
+            repo_refreshing: HashSet::new(),
+            closed: HashMap::new(),
             fetch_error: None,
             loading: true,
             rate: None,
@@ -252,6 +287,7 @@ impl App {
             item.id.clone(),
             ClaudeRun {
                 repo: item.repo.clone(),
+                repo_full: item.repo_full.clone(),
                 number: item.number,
                 prompt: task.clone(),
                 started: Instant::now(),
@@ -278,6 +314,8 @@ impl App {
         };
         run.finished = Some(Instant::now());
         let what = format!("{}#{}", run.repo, run.number);
+        let repo_full = run.repo_full.clone();
+        let ran = result.is_ok();
         match result {
             Ok(out) => {
                 run.state = RunState::Done(out.code);
@@ -291,7 +329,6 @@ impl App {
                     .unwrap_or_default();
                 if out.code == 0 {
                     self.set_status(format!("claude done on {what}{head}"), false);
-                    self.refresh.notify_one();
                 } else {
                     let code = out.code;
                     self.set_status(format!("claude exited {code} on {what}{head}"), true);
@@ -301,6 +338,15 @@ impl App {
                 run.state = RunState::Failed(e.clone());
                 self.set_status(format!("claude could not run on {what}: {e}"), true);
             }
+        }
+        // Even a failed or partial run may have pushed, and a push restarts CI: show the new
+        // checks soon instead of the old, passing ones.
+        if ran {
+            self.mark_stale(Some(&item_id));
+            if self.selected.as_deref() == Some(item_id.as_str()) {
+                self.ensure_detail();
+            }
+            self.schedule_refreshes(repo_full, item_id, CLAUDE_REFRESH_AT);
         }
     }
 
@@ -588,7 +634,17 @@ impl App {
                     }
                 }
             }
-            Msg::ActionDone(Ok(out)) => {
+            Msg::RepoRefreshing(repo) => {
+                self.repo_refreshing.insert(repo);
+            }
+            Msg::RepoList(repo, r) => self.on_repo_list(repo, r),
+            Msg::RefreshDetail(id) => {
+                self.mark_stale(Some(&id));
+                if self.selected.as_deref() == Some(id.as_str()) {
+                    self.ensure_detail();
+                }
+            }
+            Msg::ActionDone(acted, Ok(out)) => {
                 self.mark_stale(None);
                 self.set_status(
                     if out.is_empty() {
@@ -598,10 +654,13 @@ impl App {
                     },
                     false,
                 );
+                if let Some(label) = acted.ends_as {
+                    self.mark_closed(&acted, label);
+                }
                 self.ensure_detail();
-                self.refresh.notify_one();
+                self.schedule_refreshes(acted.repo_full, acted.item_id, ACTION_REFRESH_AT);
             }
-            Msg::ActionDone(Err(e)) => self.set_status(e, true),
+            Msg::ActionDone(_, Err(e)) => self.set_status(e, true),
             Msg::ClaudeDone(id, r) => self.on_claude_done(id, r),
         }
         !tick || self.tick_needs_redraw()
@@ -621,42 +680,152 @@ impl App {
         self.loading = false;
         match r {
             Ok(snap) => {
-                let first = self.last_ok.is_none();
-                for i in snap.prs.iter().chain(snap.issues.iter()) {
-                    let changed = self.seen.get(&i.id).is_none_or(|t| *t != i.updated_at);
-                    if changed && !first {
-                        self.fresh.insert(i.id.clone());
-                    }
-                    self.seen.insert(i.id.clone(), i.updated_at);
-                }
-                let prev = self.selected_item();
-                self.prs = snap.prs;
-                self.issues = snap.issues;
-                self.keep_ghost(prev);
-                self.rate = snap.rate_remaining;
+                self.apply_snapshot(snap, None);
                 self.last_ok = Some(Instant::now());
                 self.fetch_error = None;
-                self.ensure_selection();
-                if let Some(id) = &self.selected {
-                    let id = id.clone();
-                    self.mark_stale(Some(&id));
-                }
-                self.ensure_detail();
             }
             Err(e) => self.fetch_error = Some(e),
         }
+    }
+
+    fn on_repo_list(&mut self, repo_full: String, r: Result<Snapshot, String>) {
+        self.repo_refreshing.remove(&repo_full);
+        match r {
+            Ok(snap) => self.apply_snapshot(snap, Some(&repo_full)),
+            Err(e) => self.set_status(format!("couldn't refresh {repo_full}: {e}"), true),
+        }
+    }
+
+    /// Turns the item an action just merged or closed into the lingering ghost right away,
+    /// without waiting for GitHub's search to stop listing it.
+    fn mark_closed(&mut self, acted: &Acted, label: &str) {
+        self.closed.insert(
+            acted.item_id.clone(),
+            (label.to_string(), acted.repo_full.clone(), Instant::now()),
+        );
+        for list in [&mut self.prs, &mut self.issues] {
+            if let Some(i) = list.iter_mut().find(|i| i.id == acted.item_id) {
+                i.gone = Some(label.to_string());
+                if self.selected.as_deref() == Some(acted.item_id.as_str()) {
+                    self.ghost = Some(i.clone());
+                }
+            }
+        }
+        self.mark_stale(Some(&acted.item_id));
+    }
+
+    /// Applies locally known merges and closes to a freshly assembled list: the selected one
+    /// stays as a labelled ghost, the rest are hidden. An entry is forgotten once GitHub stops
+    /// listing the item, or after `CLOSED_TRUST`.
+    fn apply_closed(&mut self, listed_in_scope: &HashSet<String>, only_repo: Option<&str>) {
+        self.closed.retain(|id, (_, repo, at)| {
+            let in_scope = only_repo.is_none_or(|r| r == repo);
+            let fresh_enough = at.elapsed() < CLOSED_TRUST;
+            let still_listed = !in_scope || listed_in_scope.contains(id);
+            fresh_enough && still_listed
+        });
+        let selected = self.selected.clone();
+        let closed = &self.closed;
+        for list in [&mut self.prs, &mut self.issues] {
+            list.retain_mut(|i| match closed.get(&i.id) {
+                Some((label, _, _)) if selected.as_deref() == Some(i.id.as_str()) => {
+                    i.gone = Some(label.clone());
+                    true
+                }
+                Some(_) => false,
+                None => true,
+            });
+        }
+    }
+
+    /// Replaces the lists with `snap`, or, given a repo, only that repo's items.
+    fn apply_snapshot(&mut self, snap: Snapshot, only_repo: Option<&str>) {
+        let first = self.last_ok.is_none() && only_repo.is_none();
+        for i in snap.prs.iter().chain(snap.issues.iter()) {
+            let changed = self.seen.get(&i.id).is_none_or(|t| *t != i.updated_at);
+            let being_viewed = self.selected.as_deref() == Some(i.id.as_str());
+            if changed && !first && !being_viewed {
+                self.fresh.insert(i.id.clone());
+            }
+            self.seen.insert(i.id.clone(), i.updated_at);
+        }
+        let prev = self.selected_item();
+        let listed: HashSet<String> = snap
+            .prs
+            .iter()
+            .chain(snap.issues.iter())
+            .map(|i| i.id.clone())
+            .collect();
+        match only_repo {
+            None => {
+                self.prs = snap.prs;
+                self.issues = snap.issues;
+            }
+            Some(repo) => {
+                for (list, new) in [(&mut self.prs, snap.prs), (&mut self.issues, snap.issues)] {
+                    list.retain(|i| i.repo_full != repo);
+                    list.extend(new);
+                }
+            }
+        }
+        self.apply_closed(&listed, only_repo);
+        self.keep_ghost(prev);
+        if snap.rate_remaining.is_some() {
+            self.rate = snap.rate_remaining;
+        }
+        self.ensure_selection();
+        if let Some(id) = self.selected.clone() {
+            self.mark_stale(Some(&id));
+        }
+        self.ensure_detail();
+    }
+
+    /// Refreshes `repo_full`, and the details of `item_id`, at each of `delays` after something
+    /// changed. GitHub's search index and CI lag behind writes by seconds, so one refresh is
+    /// not enough.
+    fn schedule_refreshes(
+        &mut self,
+        repo_full: String,
+        item_id: String,
+        delays: &'static [Duration],
+    ) {
+        if self.demo {
+            return;
+        }
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut waited = Duration::ZERO;
+            for at in delays {
+                tokio::time::sleep(*at - waited).await;
+                waited = *at;
+                if tx.send(Msg::RefreshDetail(item_id.clone())).is_err()
+                    || tx.send(Msg::RepoRefreshing(repo_full.clone())).is_err()
+                {
+                    return;
+                }
+                let r = gh::fetch_repo(&repo_full)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                if tx.send(Msg::RepoList(repo_full.clone(), r)).is_err() {
+                    return;
+                }
+            }
+        });
     }
 
     /// Keeps the selected item on screen if the refresh dropped it from the open list.
     fn keep_ghost(&mut self, prev: Option<Item>) {
         self.ghost = None;
         let Some(mut item) = prev else { return };
-        if self
+        if let Some(listed) = self
             .prs
             .iter()
             .chain(self.issues.iter())
-            .any(|i| i.id == item.id)
+            .find(|i| i.id == item.id)
         {
+            if listed.gone.is_some() {
+                self.ghost = Some(listed.clone());
+            }
             return;
         }
         let first_time = item.gone.is_none();
@@ -810,6 +979,15 @@ impl App {
         let Some(item) = self.selected_item() else {
             return;
         };
+        let acted = Acted {
+            repo_full: item.repo_full.clone(),
+            item_id: item.id.clone(),
+            ends_as: match &op {
+                Op::Merge(_) => Some("MERGED"),
+                Op::Close => Some("CLOSED"),
+                _ => None,
+            },
+        };
         let req = ActionReq {
             kind: item.kind,
             repo_full: item.repo_full.clone(),
@@ -820,7 +998,7 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let r = gh::run_action(&req).await.map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Msg::ActionDone(r));
+            let _ = tx.send(Msg::ActionDone(acted, r));
         });
     }
 
@@ -1436,6 +1614,7 @@ mod tests {
         let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
         let run = || ClaudeRun {
             repo: "r".into(),
+            repo_full: "o/r".into(),
             number: 1,
             prompt: "p".into(),
             started: Instant::now(),
@@ -1789,7 +1968,7 @@ mod tests {
     async fn actions_mark_everything_stale_instead_of_clearing_it() {
         let mut app = app_with_cached_detail();
         let id = app.selected.clone().unwrap();
-        app.update(Msg::ActionDone(Ok("done".into())));
+        app.update(Msg::ActionDone(acted("o/a", "a1", None), Ok("done".into())));
         assert!(app.details.contains_key(&id) && app.diffs.contains_key(&id));
         assert!(is_stale(&app, &id));
     }
@@ -1824,5 +2003,341 @@ mod tests {
         assert_eq!(app.details[&id].body, "new body");
         assert!(!app.detail_err.contains_key(&id));
         assert!(!is_stale(&app, &id) || app.details[&id].fetched.elapsed() <= DETAIL_STALE);
+    }
+
+    fn two_repo_app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
+        app.demo = true;
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![item("a", 1, 1), item("a", 2, 2), item("b", 3, 3)],
+            issues: vec![],
+            rate_remaining: Some(100),
+        })));
+        app
+    }
+
+    #[tokio::test]
+    async fn a_repo_refresh_replaces_only_that_repos_items() {
+        let mut app = two_repo_app();
+        let started = app.last_ok;
+        let mut changed = item("a", 1, 20);
+        changed.title = "renamed".into();
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(Snapshot {
+                prs: vec![changed, item("a", 9, 5)],
+                issues: vec![],
+                rate_remaining: None,
+            }),
+        ));
+        let mut numbers: Vec<u64> = app.prs.iter().map(|p| p.number).collect();
+        numbers.sort();
+        assert_eq!(
+            numbers,
+            [1, 3, 9],
+            "repo a's #2 is gone, repo b untouched, #9 added"
+        );
+        assert!(app.prs.iter().any(|p| p.title == "renamed"));
+        assert_eq!(app.rate, Some(100), "no new rate info keeps the old");
+        assert_eq!(app.last_ok, started, "the full-refresh clock is untouched");
+        assert!(app.fetch_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn merging_in_a_repo_refresh_leaves_the_selected_pr_as_a_ghost() {
+        let mut app = two_repo_app();
+        press(&mut app, KeyCode::Char('j'));
+        let id = app.selected.clone().unwrap();
+        assert_eq!(id, "a2");
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(Snapshot {
+                prs: vec![item("a", 1, 1)],
+                issues: vec![],
+                rate_remaining: None,
+            }),
+        ));
+        assert!(
+            app.ghost_selected(),
+            "merged PR stays visible until you move off it"
+        );
+        assert_eq!(app.selected.as_deref(), Some("a2"));
+    }
+
+    #[tokio::test]
+    async fn repo_refresh_failures_are_reported_and_keep_the_data() {
+        let mut app = two_repo_app();
+        app.update(Msg::RepoRefreshing("o/a".into()));
+        assert!(app.repo_refreshing.contains("o/a"));
+        app.update(Msg::RepoList("o/a".into(), Err("HTTP 502".into())));
+        assert!(app.repo_refreshing.is_empty());
+        assert_eq!(app.prs.len(), 3);
+        assert!(app
+            .status
+            .as_ref()
+            .is_some_and(|s| s.error && s.text.contains("couldn't refresh o/a")));
+    }
+
+    #[tokio::test]
+    async fn the_item_you_are_looking_at_is_not_marked_changed_by_your_own_action() {
+        let mut app = two_repo_app();
+        let id = app.selected.clone().unwrap();
+        let mut updated = item("a", 1, 25);
+        updated.id = id.clone();
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(Snapshot {
+                prs: vec![updated, item("a", 2, 2)],
+                issues: vec![],
+                rate_remaining: None,
+            }),
+        ));
+        assert!(!app.fresh.contains(&id));
+    }
+
+    #[tokio::test]
+    async fn other_repos_changes_found_by_a_repo_refresh_are_marked_fresh() {
+        let mut app = two_repo_app();
+        app.selected = Some("b3".into());
+        let mut bumped = item("a", 2, 28);
+        bumped.id = "a2".into();
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(Snapshot {
+                prs: vec![item("a", 1, 1), bumped],
+                issues: vec![],
+                rate_remaining: None,
+            }),
+        ));
+        assert!(app.fresh.contains("a2"));
+    }
+
+    #[tokio::test]
+    async fn actions_do_not_trigger_a_full_refresh() {
+        let notify = Arc::new(Notify::new());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, notify.clone());
+        app.update(Msg::List(Ok(Snapshot {
+            prs: vec![item("a", 1, 1)],
+            issues: vec![],
+            rate_remaining: None,
+        })));
+        app.demo = true;
+        app.update(Msg::ActionDone(acted("o/a", "a1", None), Ok("done".into())));
+        let woke = tokio::time::timeout(Duration::from_millis(50), notify.notified()).await;
+        assert!(woke.is_err(), "a targeted refresh is scheduled instead");
+    }
+
+    fn acted(repo: &str, id: &str, ends_as: Option<&'static str>) -> Acted {
+        Acted {
+            repo_full: repo.into(),
+            item_id: id.into(),
+            ends_as,
+        }
+    }
+
+    fn lists_snapshot(prs: Vec<Item>) -> Snapshot {
+        Snapshot {
+            prs,
+            issues: vec![],
+            rate_remaining: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn merging_turns_the_pr_into_a_ghost_immediately() {
+        let mut app = two_repo_app();
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected.as_deref(), Some("a2"));
+        app.update(Msg::ActionDone(
+            acted("o/a", "a2", Some("MERGED")),
+            Ok("done".into()),
+        ));
+        assert!(app.ghost_selected());
+        assert_eq!(app.selected_item().unwrap().gone.as_deref(), Some("MERGED"));
+        assert_eq!(
+            app.visible().len(),
+            3,
+            "still on screen until you move off it"
+        );
+        press(&mut app, KeyCode::Char('m'));
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "a merged PR takes no more actions"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_is_labelled_closed_and_other_actions_do_not_ghost() {
+        let mut app = two_repo_app();
+        app.update(Msg::ActionDone(
+            acted("o/a", "b3", Some("CLOSED")),
+            Ok("done".into()),
+        ));
+        assert_eq!(app.selected_item().unwrap().gone.as_deref(), Some("CLOSED"));
+
+        let mut app = two_repo_app();
+        app.update(Msg::ActionDone(acted("o/a", "b3", None), Ok("done".into())));
+        assert!(app.ghost.is_none());
+        assert!(app.selected_item().unwrap().gone.is_none());
+    }
+
+    #[tokio::test]
+    async fn search_lag_cannot_bring_a_merged_pr_back() {
+        let mut app = two_repo_app();
+        press(&mut app, KeyCode::Char('j'));
+        app.update(Msg::ActionDone(
+            acted("o/a", "a2", Some("MERGED")),
+            Ok("done".into()),
+        ));
+        let still_listed =
+            || lists_snapshot(vec![item("a", 1, 1), item("a", 2, 2), item("b", 3, 3)]);
+
+        app.update(Msg::RepoList("o/a".into(), Ok(still_listed())));
+        assert!(
+            app.ghost_selected(),
+            "search still lists it, but it stays a ghost"
+        );
+        assert_eq!(app.selected_item().unwrap().gone.as_deref(), Some("MERGED"));
+
+        press(&mut app, KeyCode::Char('k'));
+        assert!(app.ghost.is_none());
+        app.update(Msg::RepoList("o/a".into(), Ok(still_listed())));
+        app.update(Msg::List(Ok(still_listed())));
+        assert!(
+            app.prs.iter().all(|p| p.id != "a2"),
+            "navigating away drops it even while search still lists it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_local_record_is_forgotten_once_search_catches_up() {
+        let mut app = two_repo_app();
+        press(&mut app, KeyCode::Char('j'));
+        app.update(Msg::ActionDone(
+            acted("o/a", "a2", Some("MERGED")),
+            Ok("done".into()),
+        ));
+        press(&mut app, KeyCode::Char('k'));
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(lists_snapshot(vec![item("a", 1, 1)])),
+        ));
+        assert!(app.closed.is_empty(), "search no longer lists it");
+        // a later reopen shows up normally
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(lists_snapshot(vec![item("a", 1, 1), item("a", 2, 2)])),
+        ));
+        assert!(app.prs.iter().any(|p| p.id == "a2"));
+    }
+
+    #[tokio::test]
+    async fn a_repo_refresh_does_not_forget_other_repos_pending_closes() {
+        let mut app = two_repo_app();
+        app.update(Msg::ActionDone(
+            acted("o/b", "b3", Some("CLOSED")),
+            Ok("done".into()),
+        ));
+        app.update(Msg::RepoList(
+            "o/a".into(),
+            Ok(lists_snapshot(vec![item("a", 1, 1), item("a", 2, 2)])),
+        ));
+        assert!(app.closed.contains_key("b3"));
+    }
+
+    #[tokio::test]
+    async fn local_closes_expire() {
+        let mut app = two_repo_app();
+        app.update(Msg::ActionDone(
+            acted("o/a", "a1", Some("CLOSED")),
+            Ok("done".into()),
+        ));
+        app.closed.get_mut("a1").unwrap().2 =
+            Instant::now() - CLOSED_TRUST - Duration::from_secs(1);
+        app.update(Msg::List(Ok(lists_snapshot(vec![
+            item("a", 1, 1),
+            item("a", 2, 2),
+            item("b", 3, 3),
+        ]))));
+        assert!(app.closed.is_empty());
+        assert!(app.prs.iter().any(|p| p.id == "a1" && p.gone.is_none()));
+    }
+
+    fn running_claude() -> ClaudeRun {
+        ClaudeRun {
+            repo: "a".into(),
+            repo_full: "o/a".into(),
+            number: 1,
+            prompt: "p".into(),
+            started: Instant::now(),
+            finished: None,
+            state: RunState::Running,
+            log: "/tmp/x.log".into(),
+            kept_worktree: None,
+            summary: None,
+        }
+    }
+
+    fn outcome(code: i32) -> claude::Outcome {
+        claude::Outcome {
+            code,
+            summary: Some("pushed a fix".into()),
+            kept_worktree: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_finished_claude_run_marks_that_prs_details_stale_even_when_not_selected() {
+        for code in [0, 2] {
+            let mut app = app_with_cached_detail();
+            let selected = app.selected.clone().unwrap();
+            let other = "a1".to_string();
+            app.details.insert(other.clone(), detail_for());
+            app.diffs
+                .insert(other.clone(), (Instant::now(), String::new()));
+            app.runs.insert(other.clone(), running_claude());
+            assert_ne!(selected, other);
+
+            app.update(Msg::ClaudeDone(other.clone(), Ok(outcome(code))));
+            assert!(
+                app.details[&other].fetched.elapsed() > DETAIL_STALE,
+                "exit {code}: checks must be refetched, not shown from before the push"
+            );
+            assert!(app.diffs[&other].0.elapsed() > DETAIL_STALE);
+            assert!(
+                app.details[&selected].fetched.elapsed() <= DETAIL_STALE,
+                "other PRs are left alone"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_claude_run_that_could_not_start_changes_nothing() {
+        let mut app = app_with_cached_detail();
+        let id = app.selected.clone().unwrap();
+        app.runs.insert(id.clone(), running_claude());
+        app.update(Msg::ClaudeDone(id.clone(), Err("no local clone".into())));
+        assert!(app.details[&id].fetched.elapsed() <= DETAIL_STALE);
+    }
+
+    #[tokio::test]
+    async fn refresh_detail_marks_one_item_stale() {
+        let mut app = app_with_cached_detail();
+        let id = app.selected.clone().unwrap();
+        app.update(Msg::RefreshDetail(id.clone()));
+        assert!(app.details[&id].fetched.elapsed() > DETAIL_STALE);
+        app.update(Msg::RefreshDetail("unknown".into()));
+    }
+
+    #[test]
+    fn refresh_schedules_look_again_later_after_claude() {
+        for schedule in [ACTION_REFRESH_AT, CLAUDE_REFRESH_AT] {
+            assert!(schedule.windows(2).all(|w| w[0] < w[1]), "must ascend");
+            assert!(schedule[0] <= Duration::from_secs(5), "first look is soon");
+        }
+        assert!(CLAUDE_REFRESH_AT.last().unwrap() >= &Duration::from_secs(30));
+        assert!(CLAUDE_REFRESH_AT.len() > ACTION_REFRESH_AT.len());
     }
 }

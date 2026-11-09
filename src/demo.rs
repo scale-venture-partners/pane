@@ -837,6 +837,7 @@ pub fn runs(snap: &Snapshot) -> HashMap<String, ClaudeRun> {
         id(1207),
         ClaudeRun {
             repo: "lumen-web".into(),
+            repo_full: "acme/lumen-web".into(),
             number: 1207,
             prompt: prompt.into(),
             started: ago(260),
@@ -853,6 +854,7 @@ pub fn runs(snap: &Snapshot) -> HashMap<String, ClaudeRun> {
         id(471),
         ClaudeRun {
             repo: "lumen-api".into(),
+            repo_full: "acme/lumen-api".into(),
             number: 471,
             prompt: prompt.into(),
             started: ago(75),
