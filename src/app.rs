@@ -174,7 +174,16 @@ impl App {
         if self.filter.is_empty() {
             return true;
         }
-        let hay = format!("{} {} {} #{}", i.title, i.repo_full, i.author, i.number).to_lowercase();
+        let labels: Vec<&str> = i.labels.iter().map(|l| l.name.as_str()).collect();
+        let hay = format!(
+            "{} {} {} #{} {}",
+            i.title,
+            i.repo_full,
+            i.author,
+            i.number,
+            labels.join(" ")
+        )
+        .to_lowercase();
         self.filter
             .to_lowercase()
             .split_whitespace()
@@ -764,6 +773,7 @@ mod tests {
             review: None,
             ci: Ci::None,
             gone: None,
+            labels: vec![],
         }
     }
 
@@ -790,6 +800,21 @@ mod tests {
         app.filter = "tool title".into();
         assert!(app.matches(&i));
         app.filter = "tool nope".into();
+        assert!(!app.matches(&i));
+    }
+
+    #[test]
+    fn filter_matches_label_names() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Config::default(), tx, Arc::new(Notify::new()));
+        let mut i = item("tool", 1, 1);
+        i.labels = vec![crate::gh::Label {
+            name: "needs-review".into(),
+            rgb: (0, 0, 0),
+        }];
+        app.filter = "needs-review".into();
+        assert!(app.matches(&i));
+        app.filter = "blocked".into();
         assert!(!app.matches(&i));
     }
 

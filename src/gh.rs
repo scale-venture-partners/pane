@@ -17,6 +17,37 @@ pub enum Kind {
     Issue,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Label {
+    pub name: String,
+    pub rgb: (u8, u8, u8),
+}
+
+const NEUTRAL_LABEL: (u8, u8, u8) = (128, 128, 128);
+
+/// Parses GitHub's six-digit label color; anything else becomes neutral gray.
+pub fn parse_hex(s: &str) -> (u8, u8, u8) {
+    let s = s.trim_start_matches('#');
+    if s.len() != 6 || !s.is_ascii() {
+        return NEUTRAL_LABEL;
+    }
+    let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16);
+    match (byte(0), byte(2), byte(4)) {
+        (Ok(r), Ok(g), Ok(b)) => (r, g, b),
+        _ => NEUTRAL_LABEL,
+    }
+}
+
+fn parse_labels(v: &Value, path: &str) -> Vec<Label> {
+    nodes(v, path)
+        .iter()
+        .map(|l| Label {
+            name: text(l, "/name"),
+            rgb: parse_hex(&text(l, "/color")),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ci {
     None,
@@ -52,6 +83,7 @@ pub struct Item {
     pub ci: Ci,
     /// Set once an item has left the open list: `MERGED`, `CLOSED`, or `UNLISTED`.
     pub gone: Option<String>,
+    pub labels: Vec<Label>,
 }
 
 #[derive(Debug, Default)]
@@ -86,7 +118,7 @@ pub struct Detail {
     pub additions: u64,
     pub deletions: u64,
     pub files: u64,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub assignees: Vec<String>,
     pub requested: Vec<String>,
     pub reviews: Vec<(String, String)>,
@@ -181,11 +213,13 @@ query($q:String!,$after:String){
       __typename
       ... on PullRequest{
         id number title url updatedAt isDraft reviewDecision
+        labels(first:8){nodes{name color}}
         author{login} repository{name nameWithOwner}
         commits(last:1){nodes{commit{statusCheckRollup{state}}}}
       }
       ... on Issue{
         id number title url updatedAt
+        labels(first:8){nodes{name color}}
         author{login} repository{name nameWithOwner}
       }
     }
@@ -233,6 +267,7 @@ struct Node {
     author: Option<Login>,
     repository: Repo,
     commits: Option<Value>,
+    labels: Option<Value>,
 }
 #[derive(Deserialize)]
 struct Login {
@@ -247,6 +282,11 @@ struct Repo {
 
 impl Node {
     fn into_item(self, kind: Kind) -> Item {
+        let labels = self
+            .labels
+            .as_ref()
+            .map(|l| parse_labels(l, "/nodes"))
+            .unwrap_or_default();
         let ci = self
             .commits
             .as_ref()
@@ -271,6 +311,7 @@ impl Node {
             review: self.review_decision,
             ci,
             gone: None,
+            labels,
         }
     }
 }
@@ -351,7 +392,7 @@ pub async fn fetch_all(cfg: &Config, on_progress: impl Fn(usize, usize)) -> Resu
 const PR_DETAIL: &str = r#"
 query($id:ID!){ node(id:$id){ ... on PullRequest{
   state body headRefName baseRefName mergeable mergeStateStatus additions deletions changedFiles
-  labels(first:10){nodes{name}}
+  labels(first:20){nodes{name color}}
   assignees(first:10){nodes{login}}
   reviewRequests(first:10){nodes{requestedReviewer{... on User{login} ... on Team{name}}}}
   latestReviews(first:10){nodes{author{login} state}}
@@ -366,7 +407,7 @@ query($id:ID!){ node(id:$id){ ... on PullRequest{
 const ISSUE_DETAIL: &str = r#"
 query($id:ID!){ node(id:$id){ ... on Issue{
   state body
-  labels(first:10){nodes{name}}
+  labels(first:20){nodes{name color}}
   assignees(first:10){nodes{login}}
   comments(last:5){nodes{author{login} body createdAt}}
 }}}"#;
@@ -451,10 +492,7 @@ pub async fn fetch_detail(item: &Item) -> Result<Detail> {
         additions: num(n, "/additions"),
         deletions: num(n, "/deletions"),
         files: num(n, "/changedFiles"),
-        labels: nodes(n, "/labels/nodes")
-            .iter()
-            .map(|l| text(l, "/name"))
-            .collect(),
+        labels: parse_labels(n, "/labels/nodes"),
         assignees: nodes(n, "/assignees/nodes")
             .iter()
             .map(|a| text(a, "/login"))
@@ -700,6 +738,35 @@ mod tests {
         assert_eq!(
             action_args(&req),
             ["pr", "ready", "7", "-R", "o/r", "--undo"]
+        );
+    }
+
+    #[test]
+    fn hex_colors_parse() {
+        assert_eq!(parse_hex("d73a4a"), (0xd7, 0x3a, 0x4a));
+        assert_eq!(parse_hex("#000000"), (0, 0, 0));
+        assert_eq!(parse_hex("nope"), NEUTRAL_LABEL);
+        assert_eq!(parse_hex("zzzzzz"), NEUTRAL_LABEL);
+        assert_eq!(parse_hex("ééé"), NEUTRAL_LABEL);
+    }
+
+    #[test]
+    fn labels_come_through_the_list_response() {
+        let json = serde_json::json!({
+            "id": "I_1", "number": 1, "title": "t", "url": "u",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "author": {"login": "a"},
+            "repository": {"name": "r", "nameWithOwner": "o/r"},
+            "labels": {"nodes": [{"name": "bug", "color": "d73a4a"}]}
+        });
+        let node: Node = serde_json::from_value(json).unwrap();
+        let item = node.into_item(Kind::Issue);
+        assert_eq!(
+            item.labels,
+            [Label {
+                name: "bug".into(),
+                rgb: (0xd7, 0x3a, 0x4a)
+            }]
         );
     }
 }

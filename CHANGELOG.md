@@ -10,4 +10,5 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Clickable checks and a scrollable diff at the bottom of PR details.
 - Items that merge or close stay visible, marked `MERGED` or `CLOSED`, until you navigate away.
 - First-load screen with spinner, sign-in check, query progress, and a clear message when GitHub can't be reached.
+- Label chips in GitHub colors on rows and in details; text filter matches labels.
 - Configurable orgs, repos, refresh interval and merge method.

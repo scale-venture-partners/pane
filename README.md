@@ -7,6 +7,7 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 
 - PRs and issues in two tabs, grouped by repo, most recently active repo first.
 - Per PR at a glance: CI state `●`, review state `✓ ✗ ○`, draft `◇`.
+- Labels show as chips in GitHub's own colors, in rows (when there is room) and in details; `/` filtering matches label names.
 - `◆` marks items that changed since you last looked at them.
 - Click or press Enter for details: description, branch, diff size, mergeability, reviews, every check (click one to open it), recent comments, and the full diff at the bottom (`d` jumps to it).
 - Merge or close an item and it stays on screen marked `MERGED` or `CLOSED` until you move off it, then disappears.
@@ -24,7 +25,7 @@ pane
 
 Or from a clone: `cargo install --path .`
 
-Works on macOS and Linux. Opening links uses `open` or `xdg-open`; copying uses `pbcopy`, `wl-copy`, `xclip` or `xsel`, whichever is found.
+Works on macOS and Linux. Label colors use truecolor when `COLORTERM` says so and fall back to the nearest 256-color shade otherwise. Opening links uses `open` or `xdg-open`; copying uses `pbcopy`, `wl-copy`, `xclip` or `xsel`, whichever is found.
 
 ## Usage
 

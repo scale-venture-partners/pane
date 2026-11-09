@@ -1,5 +1,5 @@
 use crate::app::{App, Mode, Tab};
-use crate::gh::{Ci, Detail, Item, Kind};
+use crate::gh::{Ci, Detail, Item, Kind, Label};
 use chrono::Utc;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -10,6 +10,7 @@ use ratatui::Frame;
 const DIM: Color = Color::Indexed(245);
 const SEL_BG: Color = Color::Indexed(238);
 const WIDE_MIN: u16 = 110;
+const LABEL_MAX: usize = 16;
 
 pub fn age(item_time: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
     let secs = (now - item_time).num_seconds().max(0);
@@ -60,6 +61,69 @@ fn gone_color(state: &str) -> Color {
     }
 }
 
+fn truecolor() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        matches!(
+            std::env::var("COLORTERM").as_deref(),
+            Ok("truecolor") | Ok("24bit")
+        )
+    })
+}
+
+/// Nearest entry in the xterm 6x6x6 color cube.
+pub fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
+    let level = |c: u8| ((c as u16 * 5 + 127) / 255) as u8;
+    16 + 36 * level(r) + 6 * level(g) + level(b)
+}
+
+fn rgb_color((r, g, b): (u8, u8, u8)) -> Color {
+    if truecolor() {
+        Color::Rgb(r, g, b)
+    } else {
+        Color::Indexed(nearest_256(r, g, b))
+    }
+}
+
+/// Black or white text, whichever is more readable on the label color.
+pub fn label_fg((r, g, b): (u8, u8, u8)) -> Color {
+    let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+    if lum > 140.0 {
+        Color::Black
+    } else {
+        Color::White
+    }
+}
+
+fn chip_text(l: &Label, max: usize) -> String {
+    format!(" {} ", truncate(&l.name, max))
+}
+
+fn chip(l: &Label, max: usize) -> Span<'static> {
+    Span::styled(
+        chip_text(l, max),
+        Style::new().fg(label_fg(l.rgb)).bg(rgb_color(l.rgb)),
+    )
+}
+
+/// Chips that fit in `budget` columns, plus how many were left out.
+fn fit_chips(labels: &[Label], budget: usize) -> (Vec<Span<'static>>, usize) {
+    let mut out = vec![];
+    let mut used = 0;
+    for (n, l) in labels.iter().enumerate() {
+        let w = chip_text(l, LABEL_MAX).chars().count() + 1;
+        let more = labels.len() - n - 1;
+        let reserve = if more > 0 { 4 } else { 0 };
+        if used + w + reserve > budget {
+            return (out, labels.len() - n);
+        }
+        out.push(chip(l, LABEL_MAX));
+        out.push(Span::raw(" "));
+        used += w;
+    }
+    (out, 0)
+}
+
 fn item_line(i: &Item, fresh: bool, width: usize, show_author: bool) -> Line<'static> {
     let mut spans = vec![if fresh {
         Span::styled("◆", Color::Magenta)
@@ -86,8 +150,16 @@ fn item_line(i: &Item, fresh: bool, width: usize, show_author: bool) -> Line<'st
         .sum::<usize>()
         + num.chars().count()
         + right.chars().count();
-    let title = truncate(&i.title, width.saturating_sub(used + 1));
-    let pad = width.saturating_sub(used + title.chars().count());
+    let avail = width.saturating_sub(used + 1);
+    let budget = if width >= 70 { (avail / 3).min(40) } else { 0 };
+    let (mut chips, hidden) = fit_chips(&i.labels, budget);
+    if hidden > 0 {
+        chips.push(Span::styled(format!("+{hidden}"), DIM));
+    }
+    let chips_w: usize = chips.iter().map(|c| c.content.chars().count()).sum();
+    let title_room = avail.saturating_sub(chips_w);
+    let title = truncate(&i.title, title_room);
+    let pad = width.saturating_sub(used + title.chars().count() + chips_w);
     spans.push(Span::styled(num, Color::Blue));
     let title_style = if i.draft || i.gone.is_some() {
         Style::new().fg(DIM).italic()
@@ -95,7 +167,13 @@ fn item_line(i: &Item, fresh: bool, width: usize, show_author: bool) -> Line<'st
         Style::new()
     };
     spans.push(Span::styled(title, title_style));
-    spans.push(Span::raw(" ".repeat(pad)));
+    if !chips.is_empty() {
+        spans.push(Span::raw(" "));
+    }
+    spans.extend(chips);
+    spans.push(Span::raw(
+        " ".repeat(pad.saturating_sub(usize::from(chips_w > 0))),
+    ));
     spans.push(Span::styled(right, DIM));
     Line::from(spans)
 }
@@ -469,10 +547,12 @@ fn detail_text(item: &Item, d: &Detail, diff: Option<&str>, diff_err: Option<&st
     }
 
     if !d.labels.is_empty() {
-        t.push(Line::from(vec![
-            Span::styled("labels  ", DIM),
-            Span::raw(d.labels.join(", ")),
-        ]));
+        let mut spans = vec![Span::styled("labels  ", DIM)];
+        for l in &d.labels {
+            spans.push(chip(l, 40));
+            spans.push(Span::raw(" "));
+        }
+        t.push(Line::from(spans));
     }
     if !d.assignees.is_empty() {
         t.push(Line::from(vec![
@@ -801,6 +881,7 @@ mod tests {
             review: Some("APPROVED".into()),
             ci,
             gone: None,
+            labels: vec![],
         }
     }
 
@@ -1053,5 +1134,79 @@ mod tests {
         let a = app.spinner();
         app.update(crate::app::Msg::Tick);
         assert_ne!(a, app.spinner());
+    }
+
+    fn labeled(n: u64, names: &[&str]) -> Item {
+        let mut i = sample(n, "tool", Ci::Success);
+        i.labels = names
+            .iter()
+            .map(|n| Label {
+                name: n.to_string(),
+                rgb: (0xd7, 0x3a, 0x4a),
+            })
+            .collect();
+        i
+    }
+
+    #[test]
+    fn nearest_256_maps_corners() {
+        assert_eq!(nearest_256(0, 0, 0), 16);
+        assert_eq!(nearest_256(255, 255, 255), 231);
+        assert_eq!(nearest_256(255, 0, 0), 196);
+    }
+
+    #[test]
+    fn label_text_contrasts_with_background() {
+        assert_eq!(label_fg((255, 255, 0)), Color::Black);
+        assert_eq!(label_fg((0, 0, 128)), Color::White);
+    }
+
+    #[test]
+    fn chips_that_do_not_fit_are_counted() {
+        let labels: Vec<Label> = ["alpha", "beta", "gamma", "delta"]
+            .iter()
+            .map(|n| Label {
+                name: n.to_string(),
+                rgb: (1, 2, 3),
+            })
+            .collect();
+        let (spans, hidden) = fit_chips(&labels, 20);
+        assert!(hidden > 0);
+        assert!(spans.len() / 2 + hidden == 4);
+        let (all, none) = fit_chips(&labels, 200);
+        assert_eq!(none, 0);
+        assert_eq!(all.len(), 8);
+        assert_eq!(fit_chips(&labels, 0).0.len(), 0);
+    }
+
+    #[test]
+    fn row_shows_labels_without_exceeding_width() {
+        let item = labeled(1, &["bug", "needs-review", "a-very-long-label-name-indeed"]);
+        for width in [60usize, 80, 120] {
+            let line = item_line(&item, false, width, true);
+            assert!(line.width() <= width, "width {width}: {}", line.width());
+        }
+        let wide = item_line(&item, false, 120, true);
+        let text: String = wide.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("bug"));
+        assert!(text.contains("Add feature number 1"));
+    }
+
+    #[test]
+    fn narrow_rows_skip_labels() {
+        let line = item_line(&labeled(1, &["bug"]), false, 50, true);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("bug"));
+    }
+
+    #[tokio::test]
+    async fn detail_shows_label_chips() {
+        let mut app = app_with_detail("+x");
+        app.details.get_mut("id1").unwrap().labels = vec![Label {
+            name: "needs-review".into(),
+            rgb: (1, 2, 3),
+        }];
+        let out = render(&mut app, 130, 30);
+        assert!(out.contains("needs-review"));
     }
 }
