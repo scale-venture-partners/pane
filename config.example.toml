@@ -1,0 +1,15 @@
+# Copy to ~/.config/pane/config.toml. Every key is optional.
+
+# Seconds between refreshes. Minimum 15.
+refresh_secs = 90
+
+# squash, merge or rebase.
+merge_method = "squash"
+
+# Show every open PR and issue in these organizations.
+orgs = ["my-org"]
+
+# Show these repositories in addition to the orgs above.
+repos = ["octocat/hello-world"]
+
+# With both lists empty, pane shows items that involve you.

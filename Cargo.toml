@@ -1,0 +1,24 @@
+[package]
+name = "pane"
+version = "0.1.0"
+edition = "2021"
+description = "Live terminal dashboard for open GitHub PRs and issues"
+license = "MIT"
+repository = "https://github.com/scale-venture-partners/pane"
+readme = "README.md"
+keywords = ["github", "tui", "pull-requests", "issues", "dashboard"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+toml = "0.9"
+
+[profile.release]
+lto = "thin"
