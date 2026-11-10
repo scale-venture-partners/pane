@@ -332,6 +332,7 @@ mod tests {
             labels: vec![],
             head: "feature/x".into(),
             base: "main".into(),
+            comments: 0,
             default_branch: "main".into(),
             rabbit: None,
         }

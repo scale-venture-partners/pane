@@ -13,6 +13,7 @@ A live terminal dashboard for your open GitHub pull requests and issues. Leave i
 - Per PR at a glance: CI state `●`, review state `✓ ✗ ○`, draft `◇`.
 - Stacked PRs are nested: a PR that targets another open PR's branch is shown under that PR with tree connectors (`├─` `└─`), so a stack reads top to bottom. PRs that target anything else, such as `main`, stay at the top level.
 - Open [CodeRabbit](https://coderabbit.ai) review threads are flagged: an orange `CR 3` chip on the row, a badge and a CodeRabbit section in the PR details (severity, title and file:line for each thread, click to open it), and a key that has Claude work through them.
+- Issue rows show a comment count (`✎ 4`) when there are comments.
 - Labels show as chips in GitHub's own colors, in rows (when there is room) and in details; `/` filtering matches label names.
 - `◆` marks items that changed since you last looked at them.
 - The bottom-right corner shows refresh state: `↻ 12s ago · next in 78s`, a spinner with `refreshing 3/12` while a refresh runs, and `✗ refresh failed · retry in 70s` when GitHub can't be reached. The header shows the error text and how many API calls you have left.

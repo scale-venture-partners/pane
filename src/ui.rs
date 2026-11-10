@@ -163,6 +163,14 @@ fn item_line(
         .rabbit
         .filter(|r| r.unresolved > 0)
         .map(|r| format!(" CR {}{} ", r.unresolved, if r.capped { "+" } else { "" }));
+    let comments = (i.kind == Kind::Issue && i.comments > 0).then(|| {
+        if i.comments > 99 {
+            "✎ 99+".to_string()
+        } else {
+            format!("✎ {}", i.comments)
+        }
+    });
+    let comments_w = comments.as_ref().map_or(0, |t| t.chars().count() + 1);
     let rabbit_w = rabbit.as_ref().map_or(0, |t| t.chars().count() + 1);
     let used: usize = spans
         .iter()
@@ -170,7 +178,8 @@ fn item_line(
         .sum::<usize>()
         + num.chars().count()
         + right.chars().count()
-        + rabbit_w;
+        + rabbit_w
+        + comments_w;
     let avail = width.saturating_sub(used + 1);
     let budget = if width >= 70 { (avail / 3).min(40) } else { 0 };
     let (mut chips, hidden) = fit_chips(&i.labels, budget);
@@ -195,6 +204,10 @@ fn item_line(
     spans.push(Span::raw(
         " ".repeat(pad.saturating_sub(usize::from(chips_w > 0))),
     ));
+    if let Some(text) = comments {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(text, Color::Cyan));
+    }
     if let Some(text) = rabbit {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(text, Style::new().fg(Color::Black).bg(RABBIT)));
@@ -847,6 +860,7 @@ mod tests {
             labels: vec![],
             head: String::new(),
             base: String::new(),
+            comments: 0,
             default_branch: "main".into(),
             rabbit: None,
         }
@@ -1663,5 +1677,74 @@ mod tests {
         app.prs[0].gone = Some("MERGED".into());
         app.selected = Some("id1".into());
         assert!(!footer(&mut app, 150).contains("w draft"));
+    }
+
+    fn row_text(item: &Item, width: usize) -> String {
+        item_line(item, false, width, true, None, "")
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect()
+    }
+
+    fn issue_with(comments: u64) -> Item {
+        let mut i = sample(1, "tool", Ci::None);
+        i.kind = Kind::Issue;
+        i.comments = comments;
+        i
+    }
+
+    #[test]
+    fn issue_rows_show_a_comment_count() {
+        assert!(row_text(&issue_with(4), 100).contains("✎ 4"));
+        assert!(row_text(&issue_with(99), 100).contains("✎ 99"));
+        assert!(row_text(&issue_with(250), 100).contains("✎ 99+"));
+    }
+
+    #[test]
+    fn no_comment_icon_without_comments_or_on_prs() {
+        assert!(!row_text(&issue_with(0), 100).contains('✎'));
+        let mut pr = sample(1, "tool", Ci::Success);
+        pr.comments = 5;
+        assert!(!row_text(&pr, 100).contains('✎'));
+    }
+
+    #[test]
+    fn comment_count_fits_with_labels_and_threads_at_any_width() {
+        let mut i = issue_with(12);
+        i.labels = vec![
+            Label {
+                name: "bug".into(),
+                rgb: (1, 2, 3),
+            },
+            Label {
+                name: "help wanted".into(),
+                rgb: (4, 5, 6),
+            },
+        ];
+        i.rabbit = Some(crate::gh::Rabbit {
+            unresolved: 2,
+            total: 2,
+            capped: false,
+        });
+        for width in [50usize, 60, 80, 120] {
+            let line = item_line(&i, false, width, true, None, "");
+            assert!(line.width() <= width, "{width}: {}", line.width());
+        }
+        let wide = row_text(&i, 120);
+        assert!(wide.contains("✎ 12") && wide.contains("CR 2"));
+    }
+
+    #[tokio::test]
+    async fn the_issues_tab_shows_the_counts() {
+        let mut app = app_with_items();
+        app.update(crate::app::Msg::List(Ok(Snapshot {
+            prs: vec![],
+            issues: vec![issue_with(3)],
+            rate_remaining: None,
+        })));
+        app.tab = Tab::Issues;
+        let out = render(&mut app, 100, 12);
+        assert!(out.contains("✎ 3"), "{out}");
     }
 }

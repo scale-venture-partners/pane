@@ -162,6 +162,8 @@ pub struct Item {
     /// PR head and base branch names; empty for issues.
     pub head: String,
     pub base: String,
+    /// Comment count; fetched for issues only, 0 for PRs.
+    pub comments: u64,
     /// The repo's default branch; empty if GitHub did not say.
     pub default_branch: String,
     /// Set for PRs CodeRabbit has reviewed.
@@ -312,6 +314,7 @@ query($q:String!,$after:String){
       }
       ... on Issue{
         id number title url updatedAt
+        comments{totalCount}
         labels(first:8){nodes{name color}}
         author{login} repository{name nameWithOwner defaultBranchRef{name}}
       }
@@ -363,6 +366,13 @@ struct Node {
     labels: Option<Value>,
     head_ref_name: Option<String>,
     base_ref_name: Option<String>,
+    comments: Option<Count>,
+}
+
+#[derive(Deserialize)]
+struct Count {
+    #[serde(rename = "totalCount")]
+    total_count: u64,
 }
 #[derive(Deserialize)]
 struct Login {
@@ -416,6 +426,7 @@ impl Node {
             labels,
             head: self.head_ref_name.unwrap_or_default(),
             base: self.base_ref_name.unwrap_or_default(),
+            comments: self.comments.map_or(0, |c| c.total_count),
             default_branch: self
                 .repository
                 .default_branch_ref
@@ -1198,6 +1209,32 @@ mod tests {
                 .into_item(Kind::Pr)
                 .default_branch,
             ""
+        );
+    }
+
+    #[test]
+    fn issue_nodes_carry_a_comment_count() {
+        let json = serde_json::json!({
+            "id": "I_1", "number": 4, "title": "t", "url": "u",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "comments": {"totalCount": 7},
+            "repository": {"name": "r", "nameWithOwner": "o/r"}
+        });
+        let issue = serde_json::from_value::<Node>(json)
+            .unwrap()
+            .into_item(Kind::Issue);
+        assert_eq!(issue.comments, 7);
+        let none = serde_json::json!({
+            "id": "PR_1", "number": 5, "title": "t", "url": "u",
+            "updatedAt": "2026-01-02T03:04:05Z",
+            "repository": {"name": "r", "nameWithOwner": "o/r"}
+        });
+        assert_eq!(
+            serde_json::from_value::<Node>(none)
+                .unwrap()
+                .into_item(Kind::Pr)
+                .comments,
+            0
         );
     }
 }

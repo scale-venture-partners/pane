@@ -56,6 +56,7 @@ fn item(kind: Kind, s: Spec) -> Item {
         ci: s.ci,
         gone: None,
         labels: s.labels,
+        comments: 0,
         default_branch: "main".into(),
         rabbit: None,
         head: if kind == Kind::Pr && s.number == 482 {
@@ -483,6 +484,12 @@ pub fn snapshot() -> Snapshot {
             labels: vec![label("enhancement", "a2eeef")],
         }),
     ];
+    let mut issues = issues;
+    for (number, count) in [(475, 4), (470, 2), (1211, 7), (94, 1), (88, 3), (305, 12)] {
+        if let Some(i) = issues.iter_mut().find(|i| i.number == number) {
+            i.comments = count;
+        }
+    }
     Snapshot {
         prs,
         issues,

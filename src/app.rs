@@ -1297,6 +1297,7 @@ mod tests {
             labels: vec![],
             head: String::new(),
             base: String::new(),
+            comments: 0,
             default_branch: "main".into(),
             rabbit: None,
         }

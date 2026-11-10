@@ -21,6 +21,7 @@ First public version.
 - Targeted refreshes: after an action pane refreshes only that repo and PR (at ~3s and ~10s), and after a Claude run it refreshes the PR's checks and diff immediately and at ~3s, ~10s and ~30s, so restarted CI shows up promptly. Merges and closes show as `MERGED` or `CLOSED` at once and stay that way while GitHub's search catches up.
 - Merge guard: `m` refuses to merge a PR into a non-default branch that no open PR has as its head (a stack whose parent was already merged), re-checked live at merge time, with a `MERGE BLOCKED` warning in the details. `allow_merge_into` lists exceptions such as `release/*`.
 - Draft toggle (`w`) shown in the footer with its current meaning (`w draft` / `w ready`), and applied immediately so it can be flipped again without waiting for a refresh.
+- Comment count (`✎ n`) on issue rows.
 - Text filter (matches labels too), an "only mine" filter, mouse support.
 - `--demo` mode with fictional data, and `--check` to list what would be shown.
 - Optional config file for orgs, repos, refresh interval, merge method and the repair action.
