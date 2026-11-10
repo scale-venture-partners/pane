@@ -68,6 +68,8 @@ pub struct Acted {
     pub item_id: String,
     /// Set when the action ended the item's life: `MERGED` or `CLOSED`.
     pub ends_as: Option<&'static str>,
+    /// Set when the action changed the draft state: the new value.
+    pub draft: Option<bool>,
 }
 
 /// How long a locally known merge or close is trusted over GitHub's search index.
@@ -682,6 +684,11 @@ impl App {
                 if let Some(label) = acted.ends_as {
                     self.mark_closed(&acted, label);
                 }
+                if let Some(draft) = acted.draft {
+                    if let Some(i) = self.prs.iter_mut().find(|i| i.id == acted.item_id) {
+                        i.draft = draft;
+                    }
+                }
                 self.ensure_detail();
                 self.schedule_refreshes(acted.repo_full, acted.item_id, ACTION_REFRESH_AT);
             }
@@ -1010,6 +1017,11 @@ impl App {
             ends_as: match &op {
                 Op::Merge(_) => Some("MERGED"),
                 Op::Close => Some("CLOSED"),
+                _ => None,
+            },
+            draft: match &op {
+                Op::Draft => Some(true),
+                Op::Ready => Some(false),
                 _ => None,
             },
         };
@@ -2176,6 +2188,7 @@ mod tests {
             repo_full: repo.into(),
             item_id: id.into(),
             ends_as,
+            draft: None,
         }
     }
 
@@ -2510,5 +2523,56 @@ mod tests {
             );
             press(&mut app, KeyCode::Char('n'));
         }
+    }
+
+    #[tokio::test]
+    async fn the_draft_toggle_takes_effect_before_any_refresh_and_flips_back() {
+        let mut app = merge_app(vec![pr_into("a", 1, "f", "main")], Config::default());
+        let id = app.selected.clone().unwrap();
+        assert!(!app.selected_item().unwrap().draft);
+
+        press(&mut app, KeyCode::Char('w'));
+        assert!(matches!(app.mode, Mode::Confirm(Op::Draft)));
+        press(&mut app, KeyCode::Char('n'));
+
+        let done = |draft| Acted {
+            repo_full: "o/a".into(),
+            item_id: id.clone(),
+            ends_as: None,
+            draft: Some(draft),
+        };
+        app.update(Msg::ActionDone(done(true), Ok("done".into())));
+        assert!(
+            app.selected_item().unwrap().draft,
+            "now a draft, with no refresh yet"
+        );
+        press(&mut app, KeyCode::Char('w'));
+        assert!(
+            matches!(app.mode, Mode::Confirm(Op::Ready)),
+            "next toggle is back to ready"
+        );
+        press(&mut app, KeyCode::Char('n'));
+
+        app.update(Msg::ActionDone(done(false), Ok("done".into())));
+        assert!(!app.selected_item().unwrap().draft);
+        press(&mut app, KeyCode::Char('w'));
+        assert!(matches!(app.mode, Mode::Confirm(Op::Draft)));
+    }
+
+    #[tokio::test]
+    async fn other_actions_leave_the_draft_flag_alone() {
+        let mut app = merge_app(vec![pr_into("a", 1, "f", "main")], Config::default());
+        let id = app.selected.clone().unwrap();
+        app.prs[0].draft = true;
+        app.update(Msg::ActionDone(
+            Acted {
+                repo_full: "o/a".into(),
+                item_id: id,
+                ends_as: None,
+                draft: None,
+            },
+            Ok("done".into()),
+        ));
+        assert!(app.selected_item().unwrap().draft);
     }
 }

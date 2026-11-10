@@ -78,7 +78,7 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | `f` | open the first failing check |
 | `d` | jump to the diff (PR details) |
 | `]` `[` | next / previous file in the diff |
-| `a` `m` `x` `w` | approve, merge, close, toggle draft (each confirms) |
+| `a` `m` `x` `w` | approve, merge, close, toggle draft / ready for review (each confirms; the footer shows `w draft` or `w ready`) |
 | `c` | comment |
 | `r` | repair: run Claude on the PR (edit the prompt, Enter to run) |
 | `t` | have Claude work through the PR's open CodeRabbit threads |

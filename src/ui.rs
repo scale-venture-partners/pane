@@ -631,6 +631,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 ];
                 if app.tab == Tab::Prs {
                     p.extend([("a", "approve"), ("m", "merge"), ("r", "repair")]);
+                    if let Some(item) = app.selected_item().filter(|i| i.gone.is_none()) {
+                        p.push(("w", if item.draft { "ready" } else { "draft" }));
+                    }
                     let open_threads = app
                         .selected_item()
                         .and_then(|i| i.rabbit)
@@ -669,7 +672,7 @@ fn reserve_for_status(width: u16, right: &[Span]) -> usize {
 /// Keeps as many hints as fit in `budget` columns, dropping the least important first.
 /// Importance runs: help, open, move, repair, coderabbit, approve, merge, comment, then the rest.
 fn fit_hints<'a>(pairs: &[(&'a str, &'a str)], budget: usize) -> Vec<(&'a str, &'a str)> {
-    const ORDER: [&str; 9] = ["?", "enter", "↑↓", "r", "t", "a", "m", "c", "/"];
+    const ORDER: [&str; 10] = ["?", "enter", "↑↓", "r", "t", "a", "m", "w", "c", "/"];
     let rank = |k: &str| ORDER.iter().position(|o| *o == k).unwrap_or(ORDER.len());
     let mut by_rank: Vec<usize> = (0..pairs.len()).collect();
     by_rank.sort_by_key(|i| rank(pairs[*i].0));
@@ -778,7 +781,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("] [", "next / previous file in diff"),
         ("a", "approve PR (confirm)"),
         ("m", "merge PR (confirm)"),
-        ("w", "toggle draft (confirm)"),
+        ("w", "toggle draft / ready for review (confirm)"),
         ("x", "close (confirm)"),
         ("c", "comment"),
         ("r", "repair: run Claude on the PR"),
@@ -1633,5 +1636,32 @@ mod tests {
         let out = render(&mut app, 130, 40);
         assert!(!out.contains("MERGE BLOCKED"));
         assert!(!out.contains("can't merge"));
+    }
+
+    #[tokio::test]
+    async fn footer_offers_the_draft_toggle_with_the_right_label() {
+        let mut app = app_with_items();
+        app.selected = Some("id3".into());
+        let draft_row = footer(&mut app, 150);
+        assert!(
+            draft_row.contains("w ready"),
+            "PR #3 is a draft: {draft_row}"
+        );
+
+        app.selected = Some("id1".into());
+        let normal_row = footer(&mut app, 150);
+        assert!(normal_row.contains("w draft"), "{normal_row}");
+        assert!(!normal_row.contains("w ready"));
+    }
+
+    #[tokio::test]
+    async fn no_draft_hint_on_issues_or_merged_prs() {
+        let mut app = app_with_items();
+        app.tab = Tab::Issues;
+        assert!(!footer(&mut app, 150).contains("w draft"));
+        let mut app = app_with_items();
+        app.prs[0].gone = Some("MERGED".into());
+        app.selected = Some("id1".into());
+        assert!(!footer(&mut app, 150).contains("w draft"));
     }
 }
