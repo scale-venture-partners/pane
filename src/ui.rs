@@ -319,6 +319,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 
     let (mut rows, mut ids): (Vec<ListItem>, Vec<Option<String>>) = (vec![], vec![]);
     let mut sel_row = None;
+    let mut sel_group_head = false;
     let mut last_repo = String::new();
     let tree = app.visible_rows();
     let visible: Vec<&Item> = tree.iter().map(|(i, _)| *i).collect();
@@ -344,6 +345,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         }
         if app.selected.as_deref() == Some(i.id.as_str()) {
             sel_row = Some(rows.len());
+            sel_group_head = ids.last().is_some_and(|id| id.is_none());
         }
         let fresh = app.fresh.contains(&i.id);
         let busy = app.is_busy(&i.id).then(|| app.spinner());
@@ -359,6 +361,13 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     }
     app.row_ids = ids;
     app.list_state.select(sel_row);
+    // Keep a group's header in view when its first row is selected.
+    if let (Some(sel), true) = (sel_row, sel_group_head) {
+        let head = sel - 1;
+        if app.list_state.offset() > head {
+            *app.list_state.offset_mut() = head;
+        }
+    }
 
     if rows.is_empty() {
         if app.last_ok.is_none() {
@@ -912,6 +921,22 @@ mod tests {
         assert!(out.contains("engine"));
         assert!(out.contains("#2"));
         assert!(out.contains("PRs 3"));
+    }
+
+    #[tokio::test]
+    async fn first_row_of_a_group_keeps_its_header_visible() {
+        let mut app = app_with_items();
+        render(&mut app, 90, 12);
+        let first = app.row_ids.iter().flatten().next().cloned();
+        app.selected = first;
+        *app.list_state.offset_mut() = 1;
+        let out = render(&mut app, 90, 12);
+        assert_eq!(
+            app.list_state.offset(),
+            0,
+            "header row is scrolled into view"
+        );
+        assert!(out.contains("tool") || out.contains("engine"));
     }
 
     #[tokio::test]
