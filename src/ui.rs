@@ -931,7 +931,11 @@ mod tests {
         app.selected = first;
         *app.list_state.offset_mut() = 1;
         let out = render(&mut app, 90, 12);
-        assert_eq!(app.list_state.offset(), 0, "header row is scrolled into view");
+        assert_eq!(
+            app.list_state.offset(),
+            0,
+            "header row is scrolled into view"
+        );
         assert!(out.contains("tool") || out.contains("engine"));
     }
 
