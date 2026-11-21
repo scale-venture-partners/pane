@@ -70,6 +70,8 @@ With no config, pane shows open PRs and issues that involve you, plus PRs awaiti
 | Key | Action |
 | --- | --- |
 | `↑` `↓` `j` `k` | move |
+| `Home` `End` | first / last |
+| `Space` `b` (`PgDn` `PgUp`) | page down / up; in details, scroll them |
 | `Enter` `l` / `Esc` `h` | open / close details |
 | `Tab` `1` `2` | switch PRs and issues |
 | `/` | filter by text |
